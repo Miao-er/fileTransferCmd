@@ -24,8 +24,14 @@ int main(int narg, char *argv[])
     if(local_conf.loadConf())
         return -1;
     signal(SIGPIPE, SIG_IGN);
+    if(narg != 2)
+    {
+        cout << "Usage: " << argv[0] << " <bind_ip>" << endl;
+        return -1;
+    }
     // Create an hdRDMA object
-    HwRdma hwrdma(local_conf.getRdmaGidIndex(), 1024UL * local_conf.getBlockSize() * local_conf.getBlockNum() * local_conf.getMaxThreadNum());
+    HwRdma hwrdma(local_conf.getRdmaGidIndex(), 1024UL * local_conf.getBlockSize() * local_conf.getBlockNum() * local_conf.getMaxThreadNum(), inet_addr(argv[1]));
+    cout << "Server bind to addr: " << argv[1] << endl;
     if(hwrdma.init())
     {
         cout << "ERROR: initializing hwrdma!" << endl;

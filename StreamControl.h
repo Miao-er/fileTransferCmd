@@ -17,11 +17,11 @@ class StreamControl;
 #include "HwRdma.h"
 #include "LocalConf.h"
 #include "ClientInfo.h"
+#include "MessageSwap.h"
 
 struct QPInfo
 {
     uint16_t lid;
-    // uint16_t lucp_id;
     uint32_t qp_num;
     uint32_t block_num;
     uint32_t block_size;
@@ -49,11 +49,14 @@ private:
     struct ibv_cq *cq = nullptr;
     struct ibv_qp *qp = nullptr;
     QPInfo local_qp_info, remote_qp_info;
-    ClientList *client_list = nullptr;
+
     LocalConf *local_conf = nullptr;
+    RateController* rateController = nullptr;
+    bool server_mode;
 public:
     int peer_fd;
-    StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf, ClientList *client_list = nullptr);
+    uint32_t peer_addr;
+    StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf, uint32_t peer_addr, bool server_mode = false);
 
     ~StreamControl();
     int bindMemoryRegion();

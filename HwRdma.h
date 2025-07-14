@@ -10,12 +10,13 @@ using std::cout, std::endl;
 class HwRdma
 {
 public:
-    HwRdma(int gid_idx, uint64_t buffer_size)
+    HwRdma(int gid_idx, uint64_t buffer_size, uint32_t bind_ip)
     {
-        cout << "buffer_size: " << buffer_size << endl;
+        // cout << "buffer_size: " << buffer_size << endl;
         this->gid_idx = gid_idx;
         this->buffer_size = buffer_size;
         this->free_size = buffer_size;
+        this->bind_ip = bind_ip;
     }
     int setFreeSize(uint64_t size)
     {
@@ -227,6 +228,7 @@ public:
     // gid
     int gid_idx;
     ibv_gid gid;
+    uint32_t bind_ip;
 };
 
 #endif

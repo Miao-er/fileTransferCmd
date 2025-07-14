@@ -8,17 +8,20 @@ using std::chrono::nanoseconds;
 using std::chrono::duration;
 using std::chrono::duration_cast;
 
-StreamControl::StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf, ClientList *client_list)
+StreamControl::StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf, uint32_t peer_addr, bool server_mode)
 {
     this->hwrdma = hwrdma;
     this->peer_fd = peer_fd;
     this->default_rate = local_conf->getDefaultRate();
     this->local_conf = local_conf;
-    this->client_list = client_list;
+    this->peer_addr = peer_addr;
+    this->server_mode = server_mode;
 }
 
 StreamControl::~StreamControl()
 {
+    if(rateController!= nullptr)
+        delete rateController;
     if (qp != nullptr)
     {
         struct ibv_qp_attr qp_attr;
@@ -255,10 +258,17 @@ int StreamControl::connectPeer()
     //remote_qp_info.recv_depth = ntohl(net_remote_qp_info.recv_depth);
     memcpy(remote_qp_info.gid, net_remote_qp_info.gid, 16);
     //client apply block size from server
-    if(this->client_list == nullptr)
+    if(!this->server_mode)
         this->block_size = 1024UL * remote_qp_info.block_size;
     else
         this->block_size = 1024UL * local_conf->getBlockSize();
+    this->rateController = new RateController(this->default_rate, this->block_size);
+    if(this->rateController->initSwap(hwrdma->bind_ip, this->peer_addr) < 0)
+    {
+        cout << "RateController init failed." << endl;
+        return -1;
+    }
+    this->rateController->startSwap();
 #ifndef DEBUG
     cout << "     local:" << endl
     << "       lid:" << local_qp_info.lid << endl
@@ -346,6 +356,7 @@ int StreamControl::postRecvFile()
     auto t_last_recv = t;
     double delta_io = 0,delta = 0;
     int recv_num = 0;
+    this->rateController->runRecv();
     while(recv_bytes < remote_file_info.file_size)
     {
         int n = ibv_poll_cq(cq, 1, wc);
@@ -398,6 +409,7 @@ int StreamControl::postRecvFile()
             }
         }
     }
+    this->rateController->pauseRecv();
     delta = duration_cast<duration<double>>(high_resolution_clock::now() - t).count();
     cout << "total recv_num: " << recv_num << endl;
     // cout << "I/O write rate: " << remote_file_info.file_size * 8/(delta_io * 1e9) << "Gbps" << endl;
@@ -490,9 +502,11 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
     auto t2 = t1, t_io = t1;
     int count = 0;
     double duration_time = 0, duration_io = 0;
+    this->rateController->runSend();
     while (1)
     { 
         // if (unread)
+        if(this->rateController->getRate() == 0) continue;
         {
             while(1)
             {
@@ -513,7 +527,8 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
             }
         }
         //readahead(fd,file_info.file_size - bytes_left, sge.length);
-        if(remaining_recv_wqe > 0)
+        if(!this->rateController->timeToSend());
+        else if(remaining_recv_wqe > 0)
         {
             // Calculate bytes to be sent in this buffer
             t_io = high_resolution_clock::now();
@@ -521,8 +536,8 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
             duration_io += duration_cast<duration<double>>(high_resolution_clock::now() - t_io).count();
 
             auto ret = ibv_post_send(qp, &wr, &bad_wr);
-            uncomplete_bytes.push_back(bytes_payload);
-
+            uncomplete_bytes.push_back(bytes_payload); 
+            this->rateController->updateNextSend();
             if (ret != 0)
             {
                 cout << "WARNING: ibv_post_send returned non zero value (" << ret << ")" << endl;
@@ -579,6 +594,7 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
         } while (Noutstanding_writes >= buffers.size() || (bytes_left == 0 && Noutstanding_writes > 0));
         if(bytes_left == 0) break;
     }
+    this->rateController->pauseSend();
     t2 = high_resolution_clock::now();
     cout << endl;
 
@@ -641,7 +657,7 @@ int StreamControl::postRecvWr(uint64_t id)
 
 int recvData(HwRdma *hwrdma, int peer_fd,  LocalConf* local_conf, ClientList* client_list)
 {
-    StreamControl stream_control(hwrdma, peer_fd, local_conf,  client_list);
+    StreamControl stream_control(hwrdma, peer_fd, local_conf,  client_list->getClientInfo(peer_fd).ip, true);
     std::shared_ptr<int> x(NULL, [&](int *)
                            {    
                                 close(peer_fd); 
