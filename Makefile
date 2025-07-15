@@ -1,5 +1,5 @@
 CC = g++
-CFLAGS = -Wall -O2 $(shell wx-config --cxxflags)
+CFLAGS = -Wall  $(shell wx-config --cxxflags)
 LDFLAGS = $(shell wx-config --libs) -libverbs
 
 SRCS = StreamControl.cpp \

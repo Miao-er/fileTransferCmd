@@ -1,5 +1,5 @@
-#ifndef MESSAGE_SWAP_H
-#define MESSAGE_SWAP_H
+#ifndef MESSAGE_INFO_H
+#define MESSAGE_INFO_H
 #include <unistd.h>
 #include <stdint.h>
 #include <netinet/ip_icmp.h>

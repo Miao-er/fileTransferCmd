@@ -367,8 +367,7 @@ int StreamControl::postRecvFile()
         }
         else if(n == 0) //std::this_thread::sleep_for(std::chrono::microseconds(1));
         {
-            if(t_last_recv != t && 
-                duration_cast<duration<double>>(high_resolution_clock::now() - t_last_recv).count() > 1.0)
+            if( duration_cast<duration<double>>(high_resolution_clock::now() - t_last_recv).count() > 1.0)
             {
                 cout << "ERROR: unfinished recv." << endl;
                 return 0;
@@ -390,7 +389,7 @@ int StreamControl::postRecvFile()
                 recv_bytes += wc[i].byte_len;
                 //cout << "receive rate: " << wc[i].byte_len * 8 /(delta * 1e9) <<"Gbps" <<endl;
                 // auto io_start = high_resolution_clock::now();
-                write(recv_fd, (const char*)buff, wc[i].byte_len);
+                // write(recv_fd, (const char*)buff, wc[i].byte_len);
                 postRecvWr(wc[i].wr_id);
                 // auto io_end = high_resolution_clock::now();
                 // double delta_io_ = duration_cast<duration<double>>(io_end - io_start).count();
@@ -506,7 +505,9 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
     while (1)
     { 
         // if (unread)
-        if(this->rateController->getRate() == 0) continue;
+	//cout << "before--" << this->rateController->getRate() << endl;
+        if(this->rateController->message_swap->rate_init == false) continue;
+	// else cout << "rate: " << this->rateController->getRate() << endl;
         {
             while(1)
             {
@@ -526,7 +527,6 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
                 }
             }
         }
-        //readahead(fd,file_info.file_size - bytes_left, sge.length);
         if(!this->rateController->timeToSend());
         else if(remaining_recv_wqe > 0)
         {
@@ -547,7 +547,6 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
             Noutstanding_writes++;
             remaining_recv_wqe --;
             sendcnt++;
-            
             i++;
             auto id = i % buffers.size();
             auto &buffer = buffers[id];

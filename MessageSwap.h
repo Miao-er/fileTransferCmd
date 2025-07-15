@@ -164,6 +164,7 @@ public:
                 //the first time when x_r change to postive value
                 if(this->true_rate > 0 && !this->rate_init) 
                 {
+		    cout << "init rate:" << this->true_rate << endl;
                     this->timer->start(); 
                     this->rate_init = true;
                 }
@@ -272,9 +273,9 @@ public:
     }
     double getRate()
     {
-        if(message_swap->rate_init)
+        //cout << "rate_init:" << message_swap->rate_init << endl;
             return this->message_swap->true_rate;
-        else return 0.0;
+        //else return 0.0;
 
     }
     void runSend()
