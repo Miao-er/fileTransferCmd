@@ -27,11 +27,17 @@ int parse_filename(const char* filepath, char* filename)
 void handle_transfer(const std::string& local_ip, const std::string& server_ip, int port, const std::string& filepath) {
     LocalConf local_conf(getConfigPath());
     if(local_conf.loadConf())
+    {
+        std::cerr << "Failed to load local configuration." << std::endl;
         return;
+    }
     signal(SIGPIPE, SIG_IGN);
     HwRdma hwrdma(local_conf.getRdmaGidIndex(), (uint64_t)-1, inet_addr(local_ip.c_str()));
     if(hwrdma.init())
+    {
+        std::cerr << "Failed to initialize RDMA." << std::endl;
         return;
+    }
     struct sockaddr_in addr;
     bzero(&addr, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -39,7 +45,11 @@ void handle_transfer(const std::string& local_ip, const std::string& server_ip, 
     addr.sin_port = htons(port);
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        std::cerr << "Failed to connect to server at " << server_ip << ":" << port << std::endl;
+        close(sockfd);
         return;
+    }
     std::shared_ptr<int> x(NULL, [&](int *){close(sockfd);});
     StreamControl stream_control(&hwrdma, sockfd, &local_conf, addr.sin_addr.s_addr, false);
     if (stream_control.createLucpContext())
@@ -52,7 +62,10 @@ void handle_transfer(const std::string& local_ip, const std::string& server_ip, 
         return;
     char filename[256];
     if(parse_filename(filepath.c_str(), filename) < 0)
+    {
+        std::cerr << "Failed to parse filename from filepath: " << filepath << std::endl;
         return;
+    }
     stream_control.postSendFile(filepath.c_str(), filename);
 }
 
@@ -83,6 +96,7 @@ int main(int argc, char* argv[])
             std::istringstream iss(param);
             std::string local_ip, server_ip, port_str, filepath;
             iss >> local_ip >> server_ip >> port_str >> filepath;
+            cout << "Received START command with params: " << "local_ip=" << local_ip << ", server_ip=" << server_ip << ", port=" << port_str << ", filepath=" << filepath << std::endl;
             int port = std::stoi(port_str);
             std::thread(handle_transfer, local_ip, server_ip, port, filepath).detach();
         }
@@ -95,9 +109,7 @@ int main(int argc, char* argv[])
         else {
             std::cerr << "Unknown command: " << cmd << std::endl;
         }
-        std::cout << "Command received: " << cmd << std::endl;
         close(conn_fd);
     }
     return 0;
 }
-

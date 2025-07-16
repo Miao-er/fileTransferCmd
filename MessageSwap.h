@@ -9,6 +9,7 @@
 #include <chrono>
 #include <iostream>
 #include <cstring>
+#include <fstream>
 #include "timer.h"
 #include "MessageInfo.h"
 
@@ -17,6 +18,7 @@ using std::chrono::duration_cast;
 using std::chrono::duration;
 using std::chrono::nanoseconds;
 using std::cout, std::endl;
+using std::ofstream;
 
 class MessageSwap
 {
@@ -31,6 +33,7 @@ public:
     uint32_t local_ip, remote_ip;
     uint16_t send_seq;
     high_resolution_clock::time_point fisrt_send,first_recv;
+    ofstream output_file;
 
     MessageSwap(double rate, double init_interval)
     {
@@ -45,6 +48,7 @@ public:
         this->send_seq = 0;
         this->init_iter = false;
         this->rate_init = false;
+        this->output_file.open("message.log", std::ios::out);
 
         cache_packet.hdr.code = 0;
         cache_packet.hdr.type = ICMP_INFO_REQUEST;
@@ -164,12 +168,12 @@ public:
                 //the first time when x_r change to postive value
                 if(this->true_rate > 0 && !this->rate_init) 
                 {
-		    cout << "init rate:" << this->true_rate << endl;
+		    // output_file << "init rate:" << this->true_rate << endl;
                     this->timer->start(); 
                     this->rate_init = true;
                 }
                 memcpy(&(this->cache_packet),lucp_packet, sizeof(LucpPacket) - sizeof(uint64_t));
-                cout << " " << lucp_packet->payload.n_iter
+                this->output_file << " " << lucp_packet->payload.n_iter
                 << " " << (int)lucp_packet->payload.r_t 
                 << " " << lucp_packet->payload.x_r
                 << " " << this->true_rate << endl;
@@ -210,12 +214,6 @@ public:
             t = high_resolution_clock::now();
             if(timeout > t)
                 usleep(duration_cast<duration<double>>(timeout -t).count() * 1e6);
-            // if(!first_message && !this->init_iter)
-            // {
-            //     timeout += duration_interval;
-            //     continue;
-            // }
-            // cout << "interval = " << duration_cast<duration<double>>(high_resolution_clock::now() - current).count() <<endl;
             this->cache_packet.hdr.un.echo.sequence = htons(this->send_seq++);
             current = high_resolution_clock::now();
             sendto(this->raw_socket, &(this->cache_packet), sizeof(LucpPacket), 0, (struct sockaddr*)&to, len);
