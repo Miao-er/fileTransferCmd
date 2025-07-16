@@ -58,9 +58,9 @@ void send_start_cmd(const ClientInfo& client, const std::string& cmd) {
     send(sockfd, cmd.c_str(), cmd.size(), 0);
 
     // 发送参数（local_ip, server_ip, port, filepath）
-    if(cmd == "START") {
+    if(cmd == "START-UP" || cmd == "START-DOWN") {
         std::string param = client.local_ip + " " + client.server_ip + " " + std::to_string(client.port) + " " + client.filepath;
-        send(sockfd, param.c_str(), param.size(), 0);
+        send(sockfd, param.c_str(), param.size() + 1, 0);
         std::cout << "Sent START command to " << client.local_ip << std::endl;
     }
     else
@@ -73,7 +73,7 @@ int main(int argc, char* argv[]) {
     // 假设你有一个客户端列表
     if(argc != 2)
     {
-        std::cerr << "Usage: " << argv[0] << " <command>(START/END)" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <command>(START-UP/START-DOWN/END)" << std::endl;
         return 1;
     }
     std::vector<ClientInfo> clients = {};

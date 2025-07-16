@@ -53,10 +53,11 @@ private:
     LocalConf *local_conf = nullptr;
     RateController* rateController = nullptr;
     bool server_mode;
+    bool use_message;
 public:
     int peer_fd;
     uint32_t peer_addr;
-    StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf, uint32_t peer_addr, bool server_mode = false);
+    StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf, uint32_t peer_addr, bool server_mode, bool use_message = true);
 
     ~StreamControl();
     int bindMemoryRegion();

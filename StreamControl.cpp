@@ -8,7 +8,7 @@ using std::chrono::nanoseconds;
 using std::chrono::duration;
 using std::chrono::duration_cast;
 
-StreamControl::StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf, uint32_t peer_addr, bool server_mode)
+StreamControl::StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf, uint32_t peer_addr, bool server_mode, bool use_message)
 {
     this->hwrdma = hwrdma;
     this->peer_fd = peer_fd;
@@ -16,6 +16,7 @@ StreamControl::StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf,
     this->local_conf = local_conf;
     this->peer_addr = peer_addr;
     this->server_mode = server_mode;
+    this->use_message = use_message;
 }
 
 StreamControl::~StreamControl()
@@ -506,7 +507,7 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
     { 
         // if (unread)
 	//cout << "before--" << this->rateController->getRate() << endl;
-        if(this->rateController->message_swap->rate_init == false) continue;
+        if(this->use_message && this->rateController->getRate() == 0.0) continue;
 	// else cout << "rate: " << this->rateController->getRate() << endl;
         {
             while(1)
@@ -527,7 +528,7 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
                 }
             }
         }
-        if(!this->rateController->timeToSend());
+        if(this->use_message && !this->rateController->timeToSend());
         else if(remaining_recv_wqe > 0)
         {
             // Calculate bytes to be sent in this buffer

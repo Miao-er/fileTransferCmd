@@ -1,5 +1,5 @@
 *.o
-*.txt
+*.log
 client
 server
 switch

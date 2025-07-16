@@ -24,7 +24,7 @@ int parse_filename(const char* filepath, char* filename)
     return 0;
 }
 
-void handle_transfer(const std::string& local_ip, const std::string& server_ip, int port, const std::string& filepath) {
+void handle_transfer(const std::string& local_ip, const std::string& server_ip, int port, const std::string& filepath, bool use_message) {
     LocalConf local_conf(getConfigPath());
     if(local_conf.loadConf())
     {
@@ -51,7 +51,7 @@ void handle_transfer(const std::string& local_ip, const std::string& server_ip, 
         return;
     }
     std::shared_ptr<int> x(NULL, [&](int *){close(sockfd);});
-    StreamControl stream_control(&hwrdma, sockfd, &local_conf, addr.sin_addr.s_addr, false);
+    StreamControl stream_control(&hwrdma, sockfd, &local_conf, addr.sin_addr.s_addr, false, use_message);
     if (stream_control.createLucpContext())
         return;
     if (stream_control.connectPeer())
@@ -88,17 +88,27 @@ int main(int argc, char* argv[])
         char buf[1024] = {0};
         recv(conn_fd, buf, sizeof(buf), 0);
         std::string cmd(buf);
+        cout << "MASTER CMD:" << cmd << endl;
         if (cmd.find("START") == 0) {
             // 解析参数
+            bool use_message;
+            if(cmd.find("UP") != std::string::npos)
+                use_message = true;
+            else use_message = false;
             char param_buf[1024] = {0};
-            recv(conn_fd, param_buf, sizeof(param_buf), 0);
+            int n = recv(conn_fd, param_buf, sizeof(param_buf), 0);
+            if(n <= 0) {
+                std::cerr << "Failed to receive parameters." << std::endl;
+                close(conn_fd);
+                continue;
+            }
             std::string param(param_buf);
             std::istringstream iss(param);
             std::string local_ip, server_ip, port_str, filepath;
             iss >> local_ip >> server_ip >> port_str >> filepath;
-            cout << "Received START command with params: " << "local_ip=" << local_ip << ", server_ip=" << server_ip << ", port=" << port_str << ", filepath=" << filepath << std::endl;
+            cout << "params: " << "local_ip=" << local_ip << ", server_ip=" << server_ip << ", port=" << port_str << ", filepath=" << filepath << std::endl;
             int port = std::stoi(port_str);
-            std::thread(handle_transfer, local_ip, server_ip, port, filepath).detach();
+            std::thread(handle_transfer, local_ip, server_ip, port, filepath, use_message).detach();
         }
         else
         if (cmd.find("END") == 0) {

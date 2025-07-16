@@ -250,10 +250,6 @@ public:
         delete send_thread;
         delete message_swap;
     }
-    high_resolution_clock::time_point getTimeout()
-    {
-        return this->message_swap->timer->timeout;
-    }
     int initSwap(uint32_t local_addr, uint32_t remote_addr)
     {
         //TODO:
@@ -272,8 +268,9 @@ public:
     double getRate()
     {
         //cout << "rate_init:" << message_swap->rate_init << endl;
+        if(this->message_swap->rate_init)
             return this->message_swap->true_rate;
-        //else return 0.0;
+        else return 0.0;
 
     }
     void runSend()
