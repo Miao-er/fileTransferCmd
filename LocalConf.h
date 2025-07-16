@@ -20,7 +20,7 @@ public:
     : configPath(path), 
         maxThreadNum(16),
         localPort(52025),
-        rdmaGidIndex(0),
+        rdmaGidIndex(3),
         defaultRate(100.0),
         blockSize(1024), //in kbytes
         blockNum(256)
