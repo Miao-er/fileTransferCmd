@@ -34,12 +34,13 @@ public:
     void updateTimeOut() //running
     {
         //cout << "timeout:" << interval << endl;
-        timeout += duration_cast<nanoseconds>(duration<double>(interval));
+        timeout += //gh_resolution_clock::now() + 
+		   duration_cast<nanoseconds>(duration<double>(interval));
     }
     void updateInterval(double _interval) //running or not run + start
     {
         //cout << "interval:" << _interval << endl;
-        this->timeout += duration_cast<nanoseconds>(duration<double>(_interval - this->interval));
+        // this->timeout += duration_cast<nanoseconds>(duration<double>(_interval - this->interval));
         this->interval = _interval;   
     }
     bool isTimeOut() //running

@@ -199,7 +199,7 @@ int LocalConf::loadConf() {
                 error = true;
                 this->blockSize = 1024;
             }
-            if(this->blockSize <= 4 || this->blockSize > 1024 * 1024)  //4k ~ 1G
+            if(this->blockSize < 4 || this->blockSize > 1024 * 1024)  //4k ~ 1G
             {
                 std::cout << "[Error] Invalid BlockSize: " << value << std::endl;
                 std::cout << "Valid range: 4 ~ 1048576" << std::endl;

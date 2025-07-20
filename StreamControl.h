@@ -69,10 +69,10 @@ public:
     int connectPeer();
     int prepareRecv();
     int postRecvFile();
-    int postSendFile(const char *file_path, const char *file_name);
+    int postSendFile(uint64_t file_size);
     int postRecvWr(uint64_t id);        
 };
 
 int recvData(HwRdma *hwrdma, int peer_fd,  LocalConf* local_conf, ClientList* client_list);
-
+void statistic(uint64_t* bytes, uint64_t total);
 #endif

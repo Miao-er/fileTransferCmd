@@ -1,8 +1,10 @@
 #include <iostream>
 #include <chrono>
 #include <string>
+#include <thread>
 #include <sys/stat.h>
 #include "StreamControl.h"
+#define NO_IO
 using std::chrono::high_resolution_clock;
 using std::chrono::nanoseconds;
 using std::chrono::duration;
@@ -326,22 +328,9 @@ int StreamControl::postRecvFile()
         return -2;
     }
     cout << "sync receiving file: " << remote_file_info.file_path << "(" << (double)remote_file_info.file_size/1e9 << "GB)" << endl;
-    
-    local_conf->loadConf();
-    std::string save_path = local_conf->getSavedFolderPath().ToStdString() + char(wxFileName::GetPathSeparator()) + remote_file_info.file_path;
-    int recv_fd = open(save_path.c_str(), O_CREAT|O_WRONLY | O_TRUNC, 0777);
     char sync_char = 'Y';
-    if (recv_fd < 0)
-    {
-        cout << "ERROR: Unable to create file \"" << save_path << "\"!"  << "errno = " << errno << endl;
-        sync_char = 'N';
-        if(sockSyncData(1, (char *)&sync_char, (char *)&sync_char) == -1)
-            return -2;
-        return 0;
-    }
     struct ibv_wc *wc = new ibv_wc[buffers.size()];
     std::shared_ptr<int> x(NULL, [&](int *){
-        close(recv_fd);
         delete[] wc;
     });
     if(sockSyncData(1, (char *)&sync_char, (char *)&sync_char) == -1)
@@ -417,19 +406,13 @@ int StreamControl::postRecvFile()
     cout << "finish receive file:" << remote_file_info.file_path << "(" << (double)remote_file_info.file_size/1e9 << "GB)" << endl;
     return 0;
 }
-
-int StreamControl::postSendFile(const char *file_path, const char *file_name)
+int StreamControl::postSendFile(uint64_t file_size)
 {
-    struct stat statbuf;
-    auto ret = stat(file_path, &statbuf);
-    if (ret != 0)
-    {
-        cout << "ERROR: file not exist." << endl;
-        return -1;
-    }
+    assert(file_size > 0);
+    char file_name[256] = "[VIRTUAL_NO_IO_FILE]";
     FileInfo file_info, remote_file_info;
     strcpy(file_info.file_path, file_name);
-    file_info.file_size = statbuf.st_size;
+    file_info.file_size = file_size;
     if (sockSyncData(sizeof(file_info), (char *)&file_info, (char *)&remote_file_info) != 0)
     {
         cout << "ERROR: synchronous failed before post file." << endl;
@@ -440,26 +423,13 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
         cout << "ERROR: remote not ready to receive." << endl;
         return -1;
     }
-
-    int fd = open(file_path, O_RDONLY);
     char sync_char = 'Y';
-    if (fd < 0)
-    {
-        cout << "ERROR: Unable to open file \"" << file_path << "\"!" << endl;
-        sync_char = 'N';
-        if (sockSyncData(1, (char *)&sync_char, (char *)&sync_char) < 0)
-        {        
-            return -2;
-        }
-        return -1;
-    }
     struct ibv_wc *wc = new ibv_wc[buffers.size()];
     std::shared_ptr<int> x(NULL, [&](int *){
-        close(fd); 
         delete[] wc;
         });
     double filesize_GB = (double)(file_info.file_size) * 1.0E-9;
-    cout << "Sending file: " << file_path << "(" << filesize_GB << " GB)" << endl;
+    cout << "Sending file: " << file_name << "(" << filesize_GB << " GB)" << endl;
     struct ibv_send_wr wr, *bad_wr = nullptr;
     struct ibv_sge sge;
     bzero(&wr, sizeof(wr));
@@ -471,7 +441,7 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
     wr.next = NULL,
     sge.lkey = this->mr->lkey;
 
-    uint64_t bytes_left = file_info.file_size;
+    uint64_t bytes_left = file_size;
     uint64_t ack_bytes = 0;
     uint32_t Noutstanding_writes = 0;
     double delta_t_io = 0.0;
@@ -503,6 +473,8 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
     int count = 0;
     double duration_time = 0, duration_io = 0;
     this->rateController->runSend();
+    cout << "use_message: " << this->use_message << endl;
+    std::thread statistic_thread(statistic, &ack_bytes, bytes_left);
     while (1)
     { 
         // if (unread)
@@ -522,6 +494,7 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
                     return -2;
                 else 
                 {
+                    // cout << "sync_char: " << sync_char << endl;
                     assert(sync_char == 'A');
                     remaining_recv_wqe++;
                     break;
@@ -594,6 +567,7 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
         } while (Noutstanding_writes >= buffers.size() || (bytes_left == 0 && Noutstanding_writes > 0));
         if(bytes_left == 0) break;
     }
+    statistic_thread.join();
     this->rateController->pauseSend();
     t2 = high_resolution_clock::now();
     cout << endl;
@@ -626,7 +600,6 @@ int StreamControl::postSendFile(const char *file_path, const char *file_name)
         else 
             remaining_recv_wqe++;
     }
-    close(fd);
     return 0;
 }
 
@@ -676,4 +649,23 @@ int recvData(HwRdma *hwrdma, int peer_fd,  LocalConf* local_conf, ClientList* cl
     while (!stream_control.postRecvFile());
         return -1;
     return 0;
+}
+
+void statistic(uint64_t* bytes, uint64_t total)
+{
+    std::ofstream rate_out("rate.log");
+    uint64_t last_bytes = 0;
+    auto timeout = high_resolution_clock::now() + duration_cast<nanoseconds>(duration<double>(0.05)); // 50ms timeout
+    while(*bytes < total)
+    {
+        auto t = high_resolution_clock::now();
+        if(t > timeout)
+        {
+            rate_out << duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count() << ":" << ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + 0.05)) * 1e-9 << " Gbps" << endl;
+            timeout = t + duration_cast<nanoseconds>(duration<double>(0.05)); // 50ms timeout
+            last_bytes = *bytes;
+        }
+        else
+            usleep(duration_cast<duration<double>>(timeout - t).count() * 1e6);
+    }
 }
