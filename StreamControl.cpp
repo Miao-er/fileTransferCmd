@@ -502,7 +502,8 @@ int StreamControl::postSendFile(uint64_t file_size)
             }
         }
         if(this->use_message && !this->rateController->timeToSend());
-        else if(remaining_recv_wqe > 0)
+        // else if(remaining_recv_wqe > 0)
+        else
         {
             // Calculate bytes to be sent in this buffer
             t_io = high_resolution_clock::now();
@@ -655,14 +656,14 @@ void statistic(uint64_t* bytes, uint64_t total)
 {
     std::ofstream rate_out("rate.log");
     uint64_t last_bytes = 0;
-    auto timeout = high_resolution_clock::now() + duration_cast<nanoseconds>(duration<double>(0.05)); // 50ms timeout
+    auto timeout = high_resolution_clock::now() + duration_cast<nanoseconds>(duration<double>(0.01)); // 50ms timeout
     while(*bytes < total)
     {
         auto t = high_resolution_clock::now();
         if(t > timeout)
         {
-            rate_out << duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count() << ":" << ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + 0.05)) * 1e-9 << " Gbps" << endl;
-            timeout = t + duration_cast<nanoseconds>(duration<double>(0.05)); // 50ms timeout
+            rate_out << duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count() << ":" << ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + 0.01)) * 1e-9 << " Gbps" << endl;
+            timeout = t + duration_cast<nanoseconds>(duration<double>(0.01)); // 10ms timeout
             last_bytes = *bytes;
         }
         else

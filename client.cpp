@@ -25,6 +25,7 @@ struct cmd_info
     char local_ip[IP_ADDR_LEN];
     char server_ip[IP_ADDR_LEN];
     uint64_t file_size;
+    double delay; // in seconds
 };
 
 int parse_filename(const char* filepath, char* filename)
@@ -40,6 +41,7 @@ int parse_filename(const char* filepath, char* filename)
 }
 
 void handle_transfer(cmd_info cmd_info, bool use_message) {
+    usleep(cmd_info.delay * 1000000); // 等待指定的延迟时间
     LocalConf local_conf(getConfigPath());
     if(local_conf.loadConf())
     {
@@ -115,7 +117,7 @@ int main(int argc, char* argv[])
             printf("Received START command: %s\n", cmd_info.cmd_type == CMD_START_WITH_LUCP? "using LUCP" : "using DCQCN");
             printf("params: local_ip=%s, server_ip=%s, port=%d, file_size=%lf GB\n",
                    cmd_info.local_ip, cmd_info.server_ip, cmd_info.port, cmd_info.file_size / 1e9);
-
+            printf("process will start after %lf seconds\n", cmd_info.delay);
             std::thread(handle_transfer, cmd_info, use_message).detach();
         }
         else

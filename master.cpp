@@ -16,6 +16,7 @@ struct ClientInfo {
     char server_ip[IP_ADDR_LEN];
     int port;
     uint64_t file_size; // in bytes
+    double delay; // in seconds
 };
 enum CMD_TYPE
 {
@@ -30,6 +31,7 @@ struct cmd_info
     char local_ip[IP_ADDR_LEN];
     char server_ip[IP_ADDR_LEN];
     uint64_t file_size; // in bytes
+    double delay; // in seconds
 };
 void parse_size(const char* size_str, uint64_t* size) {
     if (size_str == nullptr || size == nullptr) 
@@ -53,6 +55,20 @@ void parse_size(const char* size_str, uint64_t* size) {
     }
 }
 
+void parse_delay(const char* delay_str, double* delay) {
+    if (delay_str == nullptr || delay == nullptr) 
+    {   
+        *delay = -1; // Invalid delay
+        return;
+    }
+    std::string str(delay_str);
+    if (str.back() == 's' || str.back() == 'S') {
+        str.pop_back();
+        *delay = std::stod(str); // seconds
+    }
+    else *delay = -1; // Invalid delay
+}
+
 int parse_master_config(const std::string& config_path, std::vector<ClientInfo>& clients) {
     std::ifstream fin(config_path);
     if (!fin.is_open()) {
@@ -67,14 +83,19 @@ int parse_master_config(const std::string& config_path, std::vector<ClientInfo>&
         if (line.empty() || line[0] == '#') continue;
         std::istringstream iss(line);
         ClientInfo client = {};
-        char file_size_str[16];
-        if (!(iss >> client.socket_ip >> client.local_ip >> client.server_ip >> client.port >> file_size_str)) {
+        char file_size_str[16], delay_str[16];
+        if (!(iss >> client.socket_ip >> client.local_ip >> client.server_ip >> client.port >> file_size_str >> delay_str)) {
             std::cerr << "Invalid line in config: " << line << std::endl;
             return -1;
         }
         parse_size(file_size_str, &client.file_size);
+        parse_delay(delay_str, &client.delay);
         if (client.file_size == (uint64_t) -1) {
             std::cerr << "Invalid file size in config: " << file_size_str << std::endl;
+            return -1;
+        }
+        if (client.delay < 0) {
+            std::cerr << "Invalid delay in config: " << delay_str << std::endl;
             return -1;
         }
         clients.push_back(client);
@@ -107,7 +128,7 @@ void send_start_cmd(const ClientInfo& client, const std::string& cmd) {
     addr.sin_port = htons(2025);
     addr.sin_addr.s_addr = inet_addr(client.socket_ip);
     if (connect(sockfd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "Connect error for " << client.local_ip << std::endl;
+        std::cerr << "Connect error for " << client.socket_ip << std::endl;
         close(sockfd);
         return;
     }
@@ -115,6 +136,7 @@ void send_start_cmd(const ClientInfo& client, const std::string& cmd) {
     strncpy(cmd_info.local_ip, client.local_ip, IP_ADDR_LEN);
     strncpy(cmd_info.server_ip, client.server_ip, IP_ADDR_LEN);
     cmd_info.file_size = client.file_size;
+    cmd_info.delay = client.delay;
 
     send(sockfd, (char*)&cmd_info, sizeof(cmd_info), 0);
 

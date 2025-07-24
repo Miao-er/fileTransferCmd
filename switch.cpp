@@ -241,6 +241,10 @@ void sniff_lucp()
                 sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&from, fromlen);
             }
         }
+        else if (ip_header->protocol == IPPROTO_UDP && dst_port_cache.find(ip_header->daddr) != dst_port_cache.end()) // udp(proto.17) packet
+        {
+            sendto(sockfd, buffer, data_size, 0, (struct sockaddr *)&from, fromlen);
+        }
     }
     close(sockfd);
 }
