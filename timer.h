@@ -34,7 +34,7 @@ public:
     void updateTimeOut() //running
     {
         //cout << "timeout:" << interval << endl;
-        timeout += //gh_resolution_clock::now() + 
+        timeout = high_resolution_clock::now() + 
 		   duration_cast<nanoseconds>(duration<double>(interval));
     }
     void updateInterval(double _interval) //running or not run + start

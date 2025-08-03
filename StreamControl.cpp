@@ -389,11 +389,11 @@ int StreamControl::postRecvFile()
                 // if(recv_num > 0 && (recv_num % local_qp_info.recv_depth == 0)) //all wqe is in free state
                 int rc;
                 sync_char = 'A';
-                while((rc = send(this->peer_fd, (char*)&sync_char, 1, MSG_NOSIGNAL)) <= 0)
-                {
-                    if (rc == 0 || (rc < 0 && errno != EINTR))
-                        return -2;
-                }
+                // while((rc = send(this->peer_fd, (char*)&sync_char, 1, MSG_NOSIGNAL)) <= 0)
+                // {
+                //     if (rc == 0 || (rc < 0 && errno != EINTR))
+                //         return -2;
+                // }
 
             }
         }
@@ -482,24 +482,24 @@ int StreamControl::postSendFile(uint64_t file_size)
         if(this->use_message && this->rateController->getRate() == 0.0) continue;
 	// else cout << "rate: " << this->rateController->getRate() << endl;
         {
-            while(1)
-            {
-                int nb = recv(this->peer_fd, &sync_char, 1, MSG_DONTWAIT);
-                if(nb == 0) return -2;
-                else if(nb < 0 && errno == EWOULDBLOCK)
-                    break;
-                else if(nb < 0 && errno == EINTR)
-                    continue;
-                else if(nb < 0)
-                    return -2;
-                else 
-                {
-                    // cout << "sync_char: " << sync_char << endl;
-                    assert(sync_char == 'A');
-                    remaining_recv_wqe++;
-                    break;
-                }
-            }
+            // while(1)
+            // {
+            //     int nb = recv(this->peer_fd, &sync_char, 1, MSG_DONTWAIT);
+            //     if(nb == 0) return -2;
+            //     else if(nb < 0 && errno == EWOULDBLOCK)
+            //         break;
+            //     else if(nb < 0 && errno == EINTR)
+            //         continue;
+            //     else if(nb < 0)
+            //         return -2;
+            //     else 
+            //     {
+            //         // cout << "sync_char: " << sync_char << endl;
+            //         assert(sync_char == 'A');
+            //         remaining_recv_wqe++;
+            //         break;
+            //     }
+            // }
         }
         if(this->use_message && !this->rateController->timeToSend());
         // else if(remaining_recv_wqe > 0)
@@ -590,17 +590,17 @@ int StreamControl::postSendFile(uint64_t file_size)
     }
 #endif
 
-    while(remaining_recv_wqe < remote_qp_info.block_num)
-    {
-        int nb = recv(this->peer_fd, &sync_char, 1, MSG_DONTWAIT);
-        if(nb == 0) return -2;
-        else if(nb < 0 && (errno == EWOULDBLOCK || errno == EINTR))
-            continue;
-        else if(nb < 0)
-            return -2;
-        else 
-            remaining_recv_wqe++;
-    }
+    // while(remaining_recv_wqe < remote_qp_info.block_num)
+    // {
+    //     int nb = recv(this->peer_fd, &sync_char, 1, MSG_DONTWAIT);
+    //     if(nb == 0) return -2;
+    //     else if(nb < 0 && (errno == EWOULDBLOCK || errno == EINTR))
+    //         continue;
+    //     else if(nb < 0)
+    //         return -2;
+    //     else 
+    //         remaining_recv_wqe++;
+    // }
     return 0;
 }
 
@@ -656,14 +656,15 @@ void statistic(uint64_t* bytes, uint64_t total)
 {
     std::ofstream rate_out("rate.log");
     uint64_t last_bytes = 0;
-    auto timeout = high_resolution_clock::now() + duration_cast<nanoseconds>(duration<double>(0.01)); // 50ms timeout
+    double interval = 0.01; // 20ms
+    auto timeout = high_resolution_clock::now() + duration_cast<nanoseconds>(duration<double>(interval)); // 50ms timeout
     while(*bytes < total)
     {
         auto t = high_resolution_clock::now();
-        if(t > timeout)
+        if(t >= timeout)
         {
-            rate_out << duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count() << ":" << ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + 0.01)) * 1e-9 << " Gbps" << endl;
-            timeout = t + duration_cast<nanoseconds>(duration<double>(0.01)); // 10ms timeout
+            rate_out << duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count() << ":" << ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + interval)) * 1e-9 << " Gbps" << endl;
+            timeout = t + duration_cast<nanoseconds>(duration<double>(interval)); // 10ms timeout
             last_bytes = *bytes;
         }
         else
