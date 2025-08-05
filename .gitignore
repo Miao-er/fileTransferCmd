@@ -1,5 +1,7 @@
 *.o
 *.log
+*.lucp
+*.dcqcn
 client
 server
 switch

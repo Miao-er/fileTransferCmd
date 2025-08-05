@@ -16,9 +16,16 @@
 #include <nlohmann/json.hpp>  // 添加json库头文件
 using json = nlohmann::json;
 #define MAX_RATE 10.0
+#define DEBUG
+
+#ifdef DEBUG
+std::fstream debug_log("debug.log");
+#define DEBUG_LOG(x) debug_log << x << std::endl
+#endif
 class KafkaProducer {
 public:
     KafkaProducer(const std::string& brokers) {
+#ifndef DEBUG
         RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
         std::string errstr;
         conf->set("bootstrap.servers", brokers, errstr);
@@ -30,6 +37,7 @@ public:
         }
         std::cout << "Created producer " << _producer->name() << std::endl;
         delete conf;
+#endif
     }
     void set_topic(const std::string& topic_name) {
         topic = topic_name;
@@ -37,6 +45,7 @@ public:
 
     void send(const json& message) {
         std::string payload = message.dump();
+#ifndef DEBUG
         RdKafka::ErrorCode resp = _producer->produce(
             topic,
             RdKafka::Topic::PARTITION_UA,
@@ -52,11 +61,16 @@ public:
             std::cout << "Message sent: " << payload << std::endl;
         }
         _producer->poll(0); // 处理回调
+#else
+        DEBUG_LOG("Message sent: " + payload);
+#endif
     }
 
     ~KafkaProducer() {
+#ifndef DEBUG
         _producer->flush(1000);
         delete _producer;
+#endif
     }
 
 private:
@@ -252,6 +266,7 @@ int collect_rate_info(RateCollector& collector, int rate_sock, int idx) {
         }
     }
     collector.finished_count++;
+    std::cout << "Client " << idx << " finished" << std::endl;
     collector.finished_arr[idx] = true;
     if (collector.finished_count == collector.client_num) {
         collector.finished = true;
@@ -335,6 +350,7 @@ class KafkaConsumer {
 public:
     KafkaConsumer(const std::string& brokers, const std::string& group_id) {
         // 配置消费者属性
+#ifndef DEBUG
         RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
         std::string errstr;
         conf->set("bootstrap.servers", brokers, errstr);
@@ -348,23 +364,30 @@ public:
             exit(1);
         }
         std::cout << "Created consumer " << _consumer->name() << std::endl;
+#endif
     }
 
     void subscribe(const std::vector<std::string>& topics) {
+#ifndef DEBUG
         RdKafka::ErrorCode err = _consumer->subscribe(topics);
         if (err != RdKafka::ERR_NO_ERROR) {
             std::cerr << "Failed to subscribe to topics: " << RdKafka::err2str(err) << std::endl;
         } else {
             std::cout << "Subscribed to topics." << std::endl;
         }
+#endif
     }
-
+#ifndef DEBUG   
     void consume(KafkaProducer& producer) {
         while (true) {
             RdKafka::Message* msg = _consumer->consume(1000);  // 超时时间 1000ms
             switch (msg->err()) {
                 case RdKafka::ERR_NO_ERROR: {
                     std::string payload(static_cast<const char*>(msg->payload()), msg->len());
+#else
+    void consume(KafkaProducer& producer, std::string cmd) {
+#endif
+                    std::string payload = std::string("{\"DCQCN_ENABLE\": ") + (cmd == "UP" ? "false" : "true") + ", \"START_TRANSFER\": true}"; // 模拟接收到的消息
                     std::cout << "Received message: " << payload << std::endl;
                     try {
                         auto j = json::parse(payload);
@@ -374,9 +397,9 @@ public:
                         std::cout << "DCQCN_ENABLE: " << std::boolalpha << dcqcn_enable
                                   << ", START_TRANSFER: " << std::boolalpha << start_transfer << std::endl;
                         if (dcqcn_enable) {
-                            status = processCMD("./dcqcn.sh enable");
+                            status = processCMD("bash ./dcqcn.sh enable");
                         } else {
-                            status = processCMD("./dcqcn.sh disable");
+                            status = processCMD("bash ./dcqcn.sh disable");
                         }
                         if(status != 0) {
                             std::cerr << "Failed to execute command." << std::endl;
@@ -403,6 +426,7 @@ public:
                     } catch (const std::exception& e) {
                         std::cerr << "JSON parse error: " << e.what() << std::endl;
                     }
+#ifndef DEBUG
                     break;
                 }
                 case RdKafka::ERR__TIMED_OUT:
@@ -412,18 +436,27 @@ public:
             }
             delete msg;
         }
+#endif
     }
 
     ~KafkaConsumer() {
+#ifndef DEBUG
         _consumer->close();
         delete _consumer;
+#endif
     }
 
 private:
     RdKafka::KafkaConsumer* _consumer;
 };
 
-int main() {
+int main(int argc, char* argv[]) {
+#ifdef DEBUG
+    if(argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <command>(UP|DOWN)" << std::endl;
+        return 1;
+    }
+#endif
     if(parse_master_config("master.conf", clients) < 0) {
         std::cerr << "Failed to parse master configuration." << std::endl;
         return 1;
@@ -433,6 +466,10 @@ int main() {
     KafkaProducer producer("localhost:9092");
     consumer.subscribe({"test-topic"});
     producer.set_topic("test-topic");
+#ifndef DEBUG
     consumer.consume(producer);
+#else
+    consumer.consume(producer, argv[1]); // 模拟接收到的消息
+#endif
     return 0;
 }
