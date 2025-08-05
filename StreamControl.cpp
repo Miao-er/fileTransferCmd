@@ -406,7 +406,7 @@ int StreamControl::postRecvFile()
     cout << "finish receive file:" << remote_file_info.file_path << "(" << (double)remote_file_info.file_size/1e9 << "GB)" << endl;
     return 0;
 }
-int StreamControl::postSendFile(uint64_t file_size)
+int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
 {
     assert(file_size > 0);
     char file_name[256] = "[VIRTUAL_NO_IO_FILE]";
@@ -474,7 +474,7 @@ int StreamControl::postSendFile(uint64_t file_size)
     double duration_time = 0, duration_io = 0;
     this->rateController->runSend();
     cout << "use_message: " << this->use_message << endl;
-    std::thread statistic_thread(statistic, &ack_bytes, bytes_left);
+    std::thread statistic_thread(statistic, &ack_bytes, bytes_left, rate_sock);
     while (1)
     { 
         // if (unread)
@@ -652,22 +652,43 @@ int recvData(HwRdma *hwrdma, int peer_fd,  LocalConf* local_conf, ClientList* cl
     return 0;
 }
 
-void statistic(uint64_t* bytes, uint64_t total)
+void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
 {
     std::ofstream rate_out("rate.log");
+    RateInfo rate_info = {};
     uint64_t last_bytes = 0;
     double interval = 0.01; // 20ms
+    int seq_num = 0;
     auto timeout = high_resolution_clock::now() + duration_cast<nanoseconds>(duration<double>(interval)); // 50ms timeout
     while(*bytes < total)
     {
         auto t = high_resolution_clock::now();
         if(t >= timeout)
         {
-            rate_out << duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count() << ":" << ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + interval)) * 1e-9 << " Gbps" << endl;
+             rate_info.rate = ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + interval)) * 1e-9; // Gbps
+            rate_out << seq_num << ":" << rate_info.rate << " Gbps" << endl;
+            rate_info.seq_num = seq_num++;
+            int ret = send(rate_sock, (char*)&rate_info, sizeof(rate_info), MSG_NOSIGNAL);
+            if(ret == 0 || (ret < 0 && errno != EINTR))
+            {
+                cout << "ERROR: Failed to send rate info." << endl;
+                close(rate_sock);
+                return;
+            }
             timeout = t + duration_cast<nanoseconds>(duration<double>(interval)); // 10ms timeout
             last_bytes = *bytes;
         }
         else
             usleep(duration_cast<duration<double>>(timeout - t).count() * 1e6);
     }
+    rate_info.seq_num = seq_num;
+    rate_info.rate = 0;
+    int ret = send(rate_sock, (char*)&rate_info, sizeof(rate_info), MSG_NOSIGNAL);
+    if(ret == 0 || (ret < 0 && errno != EINTR))
+    {
+        cout << "ERROR: Failed to send rate info." << endl;
+        close(rate_sock);
+        return;
+    }
+    close(rate_sock);
 }

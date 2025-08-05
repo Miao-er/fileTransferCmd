@@ -8,6 +8,86 @@
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <deque>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <librdkafka/rdkafkacpp.h>
+#include <nlohmann/json.hpp>  // 添加json库头文件
+using json = nlohmann::json;
+#define MAX_RATE 10.0
+class KafkaProducer {
+public:
+    KafkaProducer(const std::string& brokers) {
+        RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
+        std::string errstr;
+        conf->set("bootstrap.servers", brokers, errstr);
+
+        _producer = RdKafka::Producer::create(conf, errstr);
+        if (!_producer) {
+            std::cerr << "Failed to create producer: " << errstr << std::endl;
+            exit(1);
+        }
+        std::cout << "Created producer " << _producer->name() << std::endl;
+        delete conf;
+    }
+    void set_topic(const std::string& topic_name) {
+        topic = topic_name;
+    }
+
+    void send(const json& message) {
+        std::string payload = message.dump();
+        RdKafka::ErrorCode resp = _producer->produce(
+            topic,
+            RdKafka::Topic::PARTITION_UA,
+            RdKafka::Producer::RK_MSG_COPY,
+            const_cast<char*>(payload.c_str()),
+            payload.size(),
+            nullptr, 0,
+            0, nullptr
+        );
+        if (resp != RdKafka::ERR_NO_ERROR) {
+            std::cerr << "Produce failed: " << RdKafka::err2str(resp) << std::endl;
+        } else {
+            std::cout << "Message sent: " << payload << std::endl;
+        }
+        _producer->poll(0); // 处理回调
+    }
+
+    ~KafkaProducer() {
+        _producer->flush(1000);
+        delete _producer;
+    }
+
+private:
+    RdKafka::Producer* _producer;
+    std::string topic;
+};
+
+class KafkaConsumer;
+struct RateInfo
+{
+    uint32_t seq_num;
+    double rate;
+    RateInfo() : seq_num(0), rate(-1.0){}
+};
+struct RateQueueElem {
+    std::vector<RateInfo> rates;
+    std::atomic<bool> ready;
+    uint32_t seq_num;
+    RateQueueElem(size_t n, uint32_t seq) : rates(n), ready(false), seq_num(seq) {}
+};
+
+struct RateCollector
+{
+    std::deque<RateQueueElem> rate_queue;
+    std::mutex queue_mutex;
+    std::condition_variable queue_cv;
+    size_t client_num;
+    std::atomic<uint32_t> finished_count;
+    std::vector<bool> finished_arr;
+    std::atomic<bool> finished;
+};
 
 #define IP_ADDR_LEN 16
 struct ClientInfo {
@@ -18,6 +98,8 @@ struct ClientInfo {
     uint64_t file_size; // in bytes
     double delay; // in seconds
 };
+std::vector<ClientInfo> clients = {};
+
 enum CMD_TYPE
 {
     CMD_END = 0,
@@ -104,7 +186,81 @@ int parse_master_config(const std::string& config_path, std::vector<ClientInfo>&
     return 0;
 }
 
-void send_start_cmd(const ClientInfo& client, const std::string& cmd) {
+
+// 检查线程
+void check_and_send_thread(RateCollector& collector, KafkaProducer& producer) {
+    while (collector.finished == false) {
+        std::unique_lock<std::mutex> lock(collector.queue_mutex);
+        collector.queue_cv.wait(lock, [&collector]{
+            return collector.finished || (!collector.rate_queue.empty() && collector.rate_queue.front().ready.load());
+        });
+        if(collector.finished && collector.rate_queue.empty()) break;
+        // 取出队头
+        auto& elem = collector.rate_queue.front();
+        collector.rate_queue.pop_front();
+        lock.unlock();
+
+        // 序列化为JSON
+        json j_obj;
+        float total_rate = 0.0;
+        for (size_t i = 0; i < elem.rates.size(); ++i) {
+            std::string key = "task_" + std::to_string(i + 1) + "_rate";
+            if (elem.rates[i].rate < 0) {
+                j_obj[key] = nullptr;
+            } else {
+                j_obj[key] = elem.rates[i].rate;
+                total_rate += elem.rates[i].rate;
+            }
+        }
+        j_obj["total_rate"] = total_rate > MAX_RATE ? MAX_RATE : total_rate; // 限制总速率
+        j_obj["timepoint"] = elem.seq_num;
+
+        producer.send(j_obj);
+    }
+}
+
+int collect_rate_info(RateCollector& collector, int rate_sock, int idx) {
+    RateInfo info;
+    while (true) {
+        int ret = recv(rate_sock, (char*)&info, sizeof(RateInfo) - sizeof(bool), 0);
+        if (ret <= 0) break;
+        std::unique_lock<std::mutex> lock(collector.queue_mutex);
+        int true_seq_num = info.seq_num + idx * 100; // 假设每个客户端的seq_num是连续的
+        // 检查是否需要创建新的RateQueueElem
+        if (collector.rate_queue.empty() || collector.rate_queue.back().seq_num < true_seq_num) {
+            collector.rate_queue.emplace_back(collector.client_num, true_seq_num);
+        }
+        // 填充对应位置
+        uint32_t front_seq_num = collector.rate_queue.front().seq_num;
+        collector.rate_queue[true_seq_num - front_seq_num].rates[idx] = info;
+
+        // 检查是否全部填充
+        bool all_ready = true;
+        for (size_t i = 0; i < collector.client_num; ++i) {
+            if(i == idx) continue;
+            if(collector.rate_queue[true_seq_num - front_seq_num].seq_num < i * 100)
+                break;
+            if(collector.finished_arr[i]) continue;
+            if (collector.rate_queue[true_seq_num - front_seq_num].rates[i].seq_num == 0 && collector.rate_queue[true_seq_num - front_seq_num].rates[i].rate < 0) {
+                all_ready = false;
+                break;
+            }
+        }
+        if (all_ready) {
+            collector.rate_queue[info.seq_num - front_seq_num].ready = true;
+            collector.queue_cv.notify_one();
+        }
+    }
+    collector.finished_count++;
+    collector.finished_arr[idx] = true;
+    if (collector.finished_count == collector.client_num) {
+        collector.finished = true;
+        collector.queue_cv.notify_all();
+    }
+    return 0;
+}
+
+void send_start_cmd(RateCollector& collector, const ClientInfo& client, const std::string& cmd, int idx) {
         // 发送START指令
     cmd_info cmd_info;
     if (cmd == "DOWN") {
@@ -149,29 +305,134 @@ void send_start_cmd(const ClientInfo& client, const std::string& cmd) {
     }
     else
         std::cout << "Sent END command to " << client.local_ip << std::endl;
-
+    collect_rate_info(collector, sockfd, idx);
     close(sockfd);
 }
 
-int main(int argc, char* argv[]) {
-    // 假设你有一个客户端列表
-    if(argc != 2)
-    {
-        std::cerr << "Usage: " << argv[0] << " <command>(START-UP/START-DOWN/END)" << std::endl;
-        return 1;
+int processCMD(std::string cmd)
+{
+    std::cout << "[#CMD]" << cmd << std:: endl;
+    cmd += " 2>&1";
+    FILE* fp = popen(cmd.c_str(), "r");
+    if (!fp) {
+        std::cout << "[#Err]Failed to run command: " << cmd << std::endl;
+        return -1;
     }
-    std::vector<ClientInfo> clients = {};
+    char buffer[256];
+    std::string output;
+    while (fgets(buffer, sizeof(buffer), fp)) {
+        output += buffer;
+    }
+    int status = pclose(fp);
+    if (status != 0) {
+        std::cerr << "[#Err]" << output;
+        return status;
+    }
+    return 0;
+}
+
+class KafkaConsumer {
+public:
+    KafkaConsumer(const std::string& brokers, const std::string& group_id) {
+        // 配置消费者属性
+        RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
+        std::string errstr;
+        conf->set("bootstrap.servers", brokers, errstr);
+        conf->set("group.id", group_id, errstr);
+        conf->set("auto.offset.reset", "earliest", errstr);  // 从最早的消息开始消费
+
+        // 创建消费者实例
+        _consumer = RdKafka::KafkaConsumer::create(conf, errstr);
+        if (!_consumer) {
+            std::cerr << "Failed to create consumer: " << errstr << std::endl;
+            exit(1);
+        }
+        std::cout << "Created consumer " << _consumer->name() << std::endl;
+    }
+
+    void subscribe(const std::vector<std::string>& topics) {
+        RdKafka::ErrorCode err = _consumer->subscribe(topics);
+        if (err != RdKafka::ERR_NO_ERROR) {
+            std::cerr << "Failed to subscribe to topics: " << RdKafka::err2str(err) << std::endl;
+        } else {
+            std::cout << "Subscribed to topics." << std::endl;
+        }
+    }
+
+    void consume(KafkaProducer& producer) {
+        while (true) {
+            RdKafka::Message* msg = _consumer->consume(1000);  // 超时时间 1000ms
+            switch (msg->err()) {
+                case RdKafka::ERR_NO_ERROR: {
+                    std::string payload(static_cast<const char*>(msg->payload()), msg->len());
+                    std::cout << "Received message: " << payload << std::endl;
+                    try {
+                        auto j = json::parse(payload);
+                        bool dcqcn_enable = j.value("DCQCN_ENABLE", false);
+                        bool start_transfer = j.value("START_TRANSFER", false);
+                        int status;
+                        std::cout << "DCQCN_ENABLE: " << std::boolalpha << dcqcn_enable
+                                  << ", START_TRANSFER: " << std::boolalpha << start_transfer << std::endl;
+                        if (dcqcn_enable) {
+                            status = processCMD("./dcqcn.sh enable");
+                        } else {
+                            status = processCMD("./dcqcn.sh disable");
+                        }
+                        if(status != 0) {
+                            std::cerr << "Failed to execute command." << std::endl;
+                            return;
+                        }
+                        if(start_transfer)
+                        {
+                            RateCollector collector;
+                            collector.finished = false;
+                            collector.finished_count = 0;
+                            collector.client_num = clients.size();
+                            collector.finished_arr.resize(collector.client_num, false);
+                            collector.rate_queue.clear();
+                            std::thread checker(check_and_send_thread, std::ref(collector), std::ref(producer));
+                            std::vector<std::thread> threads;
+                            int idx = 0;
+                            for (const auto& client : clients) {
+                                threads.emplace_back(send_start_cmd, std::ref(collector), client, dcqcn_enable ? "DOWN" : "UP", idx++);
+                            }
+                            for (auto& t : threads) t.join();
+                            checker.join();
+
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "JSON parse error: " << e.what() << std::endl;
+                    }
+                    break;
+                }
+                case RdKafka::ERR__TIMED_OUT:
+                    break;
+                default:
+                    std::cerr << "Error: " << msg->errstr() << std::endl;
+            }
+            delete msg;
+        }
+    }
+
+    ~KafkaConsumer() {
+        _consumer->close();
+        delete _consumer;
+    }
+
+private:
+    RdKafka::KafkaConsumer* _consumer;
+};
+
+int main() {
     if(parse_master_config("master.conf", clients) < 0) {
         std::cerr << "Failed to parse master configuration." << std::endl;
         return 1;
     }
 
-    std::vector<std::thread> threads;
-    for (const auto& client : clients) {
-        threads.emplace_back(send_start_cmd, client, std::string(argv[1]));
-    }
-    for (auto& t : threads) t.join();
-
-    std::cout << "All commands sent." << std::endl;
+    KafkaConsumer consumer("localhost:9092", "my-group");
+    KafkaProducer producer("localhost:9092");
+    consumer.subscribe({"test-topic"});
+    producer.set_topic("test-topic");
+    consumer.consume(producer);
     return 0;
 }

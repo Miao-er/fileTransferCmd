@@ -35,6 +35,12 @@ struct FileInfo
 } __attribute__((packed));
 
 
+struct RateInfo
+{
+    uint32_t seq_num;
+    double rate;
+};
+
 class StreamControl
 {
 private:
@@ -69,10 +75,10 @@ public:
     int connectPeer();
     int prepareRecv();
     int postRecvFile();
-    int postSendFile(uint64_t file_size);
+    int postSendFile(uint64_t file_size, int rate_sock);
     int postRecvWr(uint64_t id);        
 };
 
 int recvData(HwRdma *hwrdma, int peer_fd,  LocalConf* local_conf, ClientList* client_list);
-void statistic(uint64_t* bytes, uint64_t total);
+void statistic(uint64_t* bytes, uint64_t total, int rate_sock);
 #endif

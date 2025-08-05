@@ -27,7 +27,7 @@ switch: $(SWITCH_OBJS)
 	$(CC) -o $@ $^
 
 master: $(MASTER_OBJS)
-	$(CC) -o $@ $^
+	$(CC) -o $@ $^ -lrdkafka++ -lrdkafka
 
 %.o: %.cpp
 	$(CC) $(CFLAGS) -c $< -o $@

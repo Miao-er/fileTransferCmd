@@ -40,7 +40,7 @@ int parse_filename(const char* filepath, char* filename)
     return 0;
 }
 
-void handle_transfer(cmd_info cmd_info, bool use_message) {
+void handle_transfer(cmd_info cmd_info, bool use_message, int rate_sock) {
     usleep(cmd_info.delay * 1000000); // 等待指定的延迟时间
     LocalConf local_conf(getConfigPath());
     if(local_conf.loadConf())
@@ -77,7 +77,7 @@ void handle_transfer(cmd_info cmd_info, bool use_message) {
         return;
     if (stream_control.createBufferPool())
         return;
-    stream_control.postSendFile(cmd_info.file_size);
+    stream_control.postSendFile(cmd_info.file_size, rate_sock);
 }
 
 int main(int argc, char* argv[])
@@ -132,7 +132,7 @@ int main(int argc, char* argv[])
             printf("params: local_ip=%s, server_ip=%s, port=%d, file_size=%lf GB\n",
                    cmd_info.local_ip, cmd_info.server_ip, cmd_info.port, cmd_info.file_size / 1e9);
             printf("process will start after %lf seconds\n", cmd_info.delay);
-            std::thread(handle_transfer, cmd_info, use_message).detach();
+            std::thread(handle_transfer, cmd_info, use_message, conn_fd).detach();
         }
         else
         if (cmd_info.cmd_type == CMD_END) {
@@ -143,7 +143,6 @@ int main(int argc, char* argv[])
         else {
             std::cerr << "Unknown command: " << cmd_info.cmd_type << std::endl;
         }
-        close(conn_fd);
     }
     return 0;
 }
