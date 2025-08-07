@@ -15,7 +15,7 @@ user_list=(server1 server2 server3 server4 server5 server6)
 for i in ${!ip_list[@]}; do
     if [ $i -lt 3 ]; then
         if [ "$1" == "start" ]; then
-            sshpass -p "123456" ssh ${user_list[$i]}@${ip_list[$i]} "cd /home/${user_list[$i]}/fileTransferCmd; sudo ./server ${ip_list[$i]} &"
+            sshpass -p "123456" ssh ${user_list[$i]}@${ip_list[$i]} "cd /home/${user_list[$i]}/fileTransferCmd; sudo ./server ${ip_list[$i]} >/dev/null 2>&1  &"
             echo "server start for ${ip_list[$i]}"
         else 
             sshpass -p "123456" ssh ${user_list[$i]}@${ip_list[$i]} "sudo killall -e server"
@@ -23,7 +23,7 @@ for i in ${!ip_list[@]}; do
         fi
     else
         if [ "$1" == "start" ]; then
-            sshpass -p "123456" ssh ${user_list[$i]}@${ip_list[$i]} "cd /home/${user_list[$i]}/fileTransferCmd; sudo ./client &"
+            sshpass -p "123456" ssh ${user_list[$i]}@${ip_list[$i]} "cd /home/${user_list[$i]}/fileTransferCmd; sudo ./client >/dev/null 2>&1  &"
             echo "client start for ${ip_list[$i]}"
         else 
             sshpass -p "123456" ssh ${user_list[$i]}@${ip_list[$i]} "sudo killall -e client"
