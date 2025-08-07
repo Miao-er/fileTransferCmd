@@ -19,7 +19,7 @@ using json = nlohmann::json;
 #define DEBUG
 
 #ifdef DEBUG
-std::fstream debug_log("debug.log");
+std::ofstream debug_log("debug.log");
 #define DEBUG_LOG(x) debug_log << x << std::endl
 #endif
 class KafkaProducer {
@@ -62,7 +62,7 @@ public:
         }
         _producer->poll(0); // 处理回调
 #else
-        DEBUG_LOG("Message sent: " + payload);
+        DEBUG_LOG(payload);
 #endif
     }
 
@@ -98,6 +98,7 @@ struct RateCollector
     std::mutex queue_mutex;
     std::condition_variable queue_cv;
     size_t client_num;
+    std::atomic<uint32_t> wait_seq_num;
     std::atomic<uint32_t> finished_count;
     std::vector<bool> finished_arr;
     std::atomic<bool> finished;
@@ -202,18 +203,15 @@ int parse_master_config(const std::string& config_path, std::vector<ClientInfo>&
 
 
 // 检查线程
-void check_and_send_thread(RateCollector& collector, KafkaProducer& producer) {
-    while (collector.finished == false) {
-        std::unique_lock<std::mutex> lock(collector.queue_mutex);
-        collector.queue_cv.wait(lock, [&collector]{
-            return collector.finished || (!collector.rate_queue.empty() && collector.rate_queue.front().ready.load());
+void check_and_send_thread(RateCollector* collector, KafkaProducer& producer) {
+    while (collector->finished.load() == false || !collector->rate_queue.empty()) {
+        std::unique_lock<std::mutex> lock(collector->queue_mutex);
+        collector->queue_cv.wait(lock, [&collector]{
+            return collector->finished.load() || (!collector->rate_queue.empty() && collector->rate_queue.front().ready.load());
         });
-        if(collector.finished && collector.rate_queue.empty()) break;
+        if(collector->finished.load() && collector->rate_queue.empty()) break;
         // 取出队头
-        auto& elem = collector.rate_queue.front();
-        collector.rate_queue.pop_front();
-        lock.unlock();
-
+        auto& elem = collector->rate_queue.front();
         // 序列化为JSON
         json j_obj;
         float total_rate = 0.0;
@@ -228,54 +226,59 @@ void check_and_send_thread(RateCollector& collector, KafkaProducer& producer) {
         }
         j_obj["total_rate"] = total_rate > MAX_RATE ? MAX_RATE : total_rate; // 限制总速率
         j_obj["timepoint"] = elem.seq_num;
-
+        collector->rate_queue.pop_front();
+        lock.unlock();
         producer.send(j_obj);
     }
 }
 
-int collect_rate_info(RateCollector& collector, int rate_sock, int idx) {
+int collect_rate_info(RateCollector* collector, int rate_sock, int idx) {
     RateInfo info;
     while (true) {
-        int ret = recv(rate_sock, (char*)&info, sizeof(RateInfo) - sizeof(bool), 0);
+        int ret = recv(rate_sock, (char*)&info, sizeof(RateInfo), 0);
         if (ret <= 0) break;
-        std::unique_lock<std::mutex> lock(collector.queue_mutex);
+        std::unique_lock<std::mutex> lock(collector->queue_mutex);
         int true_seq_num = info.seq_num + idx * 100; // 假设每个客户端的seq_num是连续的
         // 检查是否需要创建新的RateQueueElem
-        if (collector.rate_queue.empty() || collector.rate_queue.back().seq_num < true_seq_num) {
-            collector.rate_queue.emplace_back(collector.client_num, true_seq_num);
+        while (collector->rate_queue.empty() || collector->wait_seq_num <= true_seq_num) {
+            collector->rate_queue.emplace_back(collector->client_num, collector->wait_seq_num);
+            collector->wait_seq_num ++;
         }
         // 填充对应位置
-        uint32_t front_seq_num = collector.rate_queue.front().seq_num;
-        collector.rate_queue[true_seq_num - front_seq_num].rates[idx] = info;
+        uint32_t front_seq_num = collector->rate_queue.front().seq_num;
+        collector->rate_queue[true_seq_num - front_seq_num].rates[idx] = info;
 
         // 检查是否全部填充
         bool all_ready = true;
-        for (size_t i = 0; i < collector.client_num; ++i) {
+        for (size_t i = 0; i < collector->client_num; ++i) {
             if(i == idx) continue;
-            if(collector.rate_queue[true_seq_num - front_seq_num].seq_num < i * 100)
+            if(collector->rate_queue[true_seq_num - front_seq_num].seq_num < i * 100)
                 break;
-            if(collector.finished_arr[i]) continue;
-            if (collector.rate_queue[true_seq_num - front_seq_num].rates[i].seq_num == 0 && collector.rate_queue[true_seq_num - front_seq_num].rates[i].rate < 0) {
+            if(collector->finished_arr[i]) continue;
+            if (collector->rate_queue[true_seq_num - front_seq_num].rates[i].seq_num == 0 && collector->rate_queue[true_seq_num - front_seq_num].rates[i].rate < 0) {
                 all_ready = false;
                 break;
             }
         }
         if (all_ready) {
-            collector.rate_queue[info.seq_num - front_seq_num].ready = true;
-            collector.queue_cv.notify_one();
+            collector->rate_queue[true_seq_num - front_seq_num].ready = true;
+            collector->queue_cv.notify_one();
+        }
+        if(true_seq_num > idx * 100 + 5 && info.rate < 1e-5)
+        {
+            collector->finished_count++;
+            collector->finished_arr[idx] = true;
+            std::cout << "Client " << idx << " finished" << std::endl;
         }
     }
-    collector.finished_count++;
-    std::cout << "Client " << idx << " finished" << std::endl;
-    collector.finished_arr[idx] = true;
-    if (collector.finished_count == collector.client_num) {
-        collector.finished = true;
-        collector.queue_cv.notify_all();
+    if (collector->finished_count.load() == collector->client_num){
+        collector->finished.store(true);
+        collector->queue_cv.notify_all();
     }
     return 0;
 }
 
-void send_start_cmd(RateCollector& collector, const ClientInfo& client, const std::string& cmd, int idx) {
+void send_start_cmd(RateCollector* collector, const ClientInfo& client, const std::string& cmd, int idx) {
         // 发送START指令
     cmd_info cmd_info;
     if (cmd == "DOWN") {
@@ -413,11 +416,12 @@ public:
                             collector.client_num = clients.size();
                             collector.finished_arr.resize(collector.client_num, false);
                             collector.rate_queue.clear();
-                            std::thread checker(check_and_send_thread, std::ref(collector), std::ref(producer));
+                            collector.wait_seq_num = 0;
+                            std::thread checker(check_and_send_thread, &collector, std::ref(producer));
                             std::vector<std::thread> threads;
                             int idx = 0;
                             for (const auto& client : clients) {
-                                threads.emplace_back(send_start_cmd, std::ref(collector), client, dcqcn_enable ? "DOWN" : "UP", idx++);
+                                threads.emplace_back(send_start_cmd, &collector, client, dcqcn_enable ? "DOWN" : "UP", idx++);
                             }
                             for (auto& t : threads) t.join();
                             checker.join();
@@ -452,7 +456,7 @@ private:
 
 int main(int argc, char* argv[]) {
 #ifdef DEBUG
-    if(argc < 2) {
+    if(argc < 2 || argv[1] != std::string("UP") && argv[1] != std::string("DOWN")) {
         std::cerr << "Usage: " << argv[0] << " <command>(UP|DOWN)" << std::endl;
         return 1;
     }

@@ -655,19 +655,29 @@ int recvData(HwRdma *hwrdma, int peer_fd,  LocalConf* local_conf, ClientList* cl
 void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
 {
     std::ofstream rate_out("rate.log");
-    RateInfo rate_info = {};
+    int seq_num = 0;
+    RateInfo rate_info = {
+        .seq_num = seq_num,
+        .rate = 0.0
+    };
+    int ret = send(rate_sock, (char*)&rate_info, sizeof(rate_info), MSG_NOSIGNAL);
+    if(ret == 0 || (ret < 0 && errno != EINTR))
+    {
+        cout << "ERROR: Failed to send init rate info." << endl;
+        close(rate_sock);
+        return;
+    }
     uint64_t last_bytes = 0;
     double interval = 0.01; // 20ms
-    int seq_num = 0;
     auto timeout = high_resolution_clock::now() + duration_cast<nanoseconds>(duration<double>(interval)); // 50ms timeout
     while(*bytes < total)
     {
         auto t = high_resolution_clock::now();
         if(t >= timeout)
         {
-             rate_info.rate = ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + interval)) * 1e-9; // Gbps
+            rate_info.rate = ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + interval)) * 1e-9; // Gbps
             rate_out << seq_num << ":" << rate_info.rate << " Gbps" << endl;
-            rate_info.seq_num = seq_num++;
+            rate_info.seq_num = ++seq_num;
             int ret = send(rate_sock, (char*)&rate_info, sizeof(rate_info), MSG_NOSIGNAL);
             if(ret == 0 || (ret < 0 && errno != EINTR))
             {
@@ -681,9 +691,9 @@ void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
         else
             usleep(duration_cast<duration<double>>(timeout - t).count() * 1e6);
     }
-    rate_info.seq_num = seq_num;
+    rate_info.seq_num = ++seq_num;
     rate_info.rate = 0;
-    int ret = send(rate_sock, (char*)&rate_info, sizeof(rate_info), MSG_NOSIGNAL);
+    ret = send(rate_sock, (char*)&rate_info, sizeof(rate_info), MSG_NOSIGNAL);
     if(ret == 0 || (ret < 0 && errno != EINTR))
     {
         cout << "ERROR: Failed to send rate info." << endl;
