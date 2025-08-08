@@ -16,15 +16,30 @@
 #include <nlohmann/json.hpp>  // 添加json库头文件
 using json = nlohmann::json;
 #define MAX_RATE 10.0
-#define DEBUG
+// #define DEBUG
+#define LOG_ERR_FILE
+#define LOG_RATE_FILE
 
-#ifdef DEBUG
-std::ofstream debug_log("debug.log");
-#define DEBUG_LOG(x) debug_log << x << std::endl
+#ifdef LOG_ERR_FILE
+    std::ofstream err_log("error.log");
+    #define ERR_LOG(x) err_log << x << std::endl
+#else
+    #define ERR_LOG(x) std::cerr << x << std::endl
 #endif
+
+#ifdef LOG_RATE_FILE
+    std::ofstream rate_log("rate.log");
+    #define RATE_LOG(x) rate_log << x << std::endl
+    #define RESET_LOG() {rate_log.close(); rate_log.open("rate.log", std::ios::trunc);}
+#else
+    #define RATE_LOG(x)
+    #define RESET_LOG()
+#endif
+
 class KafkaProducer {
 public:
     KafkaProducer(const std::string& brokers) {
+        RESET_LOG();
 #ifndef DEBUG
         RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
         std::string errstr;
@@ -32,7 +47,7 @@ public:
 
         _producer = RdKafka::Producer::create(conf, errstr);
         if (!_producer) {
-            std::cerr << "Failed to create producer: " << errstr << std::endl;
+            ERR_LOG("Failed to create producer: " << errstr);
             exit(1);
         }
         std::cout << "Created producer " << _producer->name() << std::endl;
@@ -56,14 +71,11 @@ public:
             0, nullptr
         );
         if (resp != RdKafka::ERR_NO_ERROR) {
-            std::cerr << "Produce failed: " << RdKafka::err2str(resp) << std::endl;
-        } else {
-            std::cout << "Message sent: " << payload << std::endl;
+            ERR_LOG("Produce failed: " << RdKafka::err2str(resp));
         }
         _producer->poll(0); // 处理回调
-#else
-        DEBUG_LOG(payload);
 #endif
+        RATE_LOG(payload);
     }
 
     ~KafkaProducer() {
@@ -363,7 +375,7 @@ public:
         // 创建消费者实例
         _consumer = RdKafka::KafkaConsumer::create(conf, errstr);
         if (!_consumer) {
-            std::cerr << "Failed to create consumer: " << errstr << std::endl;
+            ERR_LOG("Failed to create consumer: " << errstr);
             exit(1);
         }
         std::cout << "Created consumer " << _consumer->name() << std::endl;
@@ -374,7 +386,7 @@ public:
 #ifndef DEBUG
         RdKafka::ErrorCode err = _consumer->subscribe(topics);
         if (err != RdKafka::ERR_NO_ERROR) {
-            std::cerr << "Failed to subscribe to topics: " << RdKafka::err2str(err) << std::endl;
+            ERR_LOG("Failed to subscribe to topics: " << RdKafka::err2str(err));
         } else {
             std::cout << "Subscribed to topics." << std::endl;
         }
@@ -387,10 +399,15 @@ public:
             switch (msg->err()) {
                 case RdKafka::ERR_NO_ERROR: {
                     std::string payload(static_cast<const char*>(msg->payload()), msg->len());
+                    if (!payload.empty() && payload.front() == '"' && payload.back() == '"') {
+                        payload = payload.substr(1, payload.size() - 2);
+                    }
+                    // 去除所有转义反斜杠
+                    payload.erase(std::remove(payload.begin(), payload.end(), '\\'), payload.end());
 #else
     void consume(KafkaProducer& producer, std::string cmd) {
-#endif
                     std::string payload = std::string("{\"DCQCN_ENABLE\": ") + (cmd == "UP" ? "false" : "true") + ", \"START_TRANSFER\": true}"; // 模拟接收到的消息
+#endif
                     std::cout << "Received message: " << payload << std::endl;
                     try {
                         auto j = json::parse(payload);
@@ -428,7 +445,7 @@ public:
 
                         }
                     } catch (const std::exception& e) {
-                        std::cerr << "JSON parse error: " << e.what() << std::endl;
+                        ERR_LOG("JSON parse error: " << e.what());
                     }
 #ifndef DEBUG
                     break;
@@ -436,7 +453,7 @@ public:
                 case RdKafka::ERR__TIMED_OUT:
                     break;
                 default:
-                    std::cerr << "Error: " << msg->errstr() << std::endl;
+                    ERR_LOG("Error: " << msg->errstr());
             }
             delete msg;
         }
@@ -466,10 +483,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    KafkaConsumer consumer("localhost:9092", "my-group");
-    KafkaProducer producer("localhost:9092");
-    consumer.subscribe({"test-topic"});
-    producer.set_topic("test-topic");
+    KafkaConsumer consumer("223.193.6.110:9092", "sm-group");
+    KafkaProducer producer("223.193.6.110:9092");
+    consumer.subscribe({"transmission_task"});
+    producer.set_topic("transmission_task_status");
 #ifndef DEBUG
     consumer.consume(producer);
 #else

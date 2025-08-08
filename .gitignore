@@ -1,5 +1,7 @@
 *.o
-*.log
+error.log
+message.log
+rate.log
 *.lucp
 *.dcqcn
 client
