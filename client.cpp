@@ -84,15 +84,6 @@ int main(int argc, char* argv[])
 {
     int listen_port = 2025; // 客户端监听端口
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in listen_addr;
-    listen_addr.sin_family = AF_INET;
-    listen_addr.sin_addr.s_addr = INADDR_ANY;
-    listen_addr.sin_port = htons(listen_port);
-    if(bind(listen_fd, (sockaddr*)&listen_addr, sizeof(listen_addr)))
-    {
-	cout << "bind error:  " << errno << endl;
-	return -errno;
-    }
     int opt_val = 1;
     if(setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt_val, sizeof(opt_val))){
         cout << "set reuseaddr error:  " << errno << endl;
@@ -103,6 +94,15 @@ int main(int argc, char* argv[])
         return -errno;
     }
 
+   sockaddr_in listen_addr;
+    listen_addr.sin_family = AF_INET;
+    listen_addr.sin_addr.s_addr = INADDR_ANY;
+    listen_addr.sin_port = htons(listen_port);
+    if(bind(listen_fd, (sockaddr*)&listen_addr, sizeof(listen_addr)))
+    {
+	cout << "bind error:  " << errno << endl;
+	return -errno;
+    }
     listen(listen_fd, 5);
 
     std::cout << "Client listening on port " << listen_port << std::endl;

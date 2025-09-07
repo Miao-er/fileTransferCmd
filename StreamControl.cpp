@@ -208,7 +208,7 @@ int StreamControl::changeQPState()
         struct ibv_qp_attr qp_attr;
         bzero(&qp_attr, sizeof(qp_attr));
         qp_attr.qp_state = IBV_QPS_RTS,
-        qp_attr.timeout = 18,
+        qp_attr.timeout = 20,
         qp_attr.retry_cnt = 7,
         qp_attr.rnr_retry = 0,
         qp_attr.sq_psn = 0,
@@ -357,11 +357,11 @@ int StreamControl::postRecvFile()
         }
         else if(n == 0) //std::this_thread::sleep_for(std::chrono::microseconds(1));
         {
-            if( duration_cast<duration<double>>(high_resolution_clock::now() - t_last_recv).count() > 1.0)
+        /*    if( duration_cast<duration<double>>(high_resolution_clock::now() - t_last_recv).count() > 1.0)
             {
                 cout << "ERROR: unfinished recv." << endl;
                 return 0;
-            }
+            }*/
         }
         else{
             //cout << n << endl;
@@ -675,8 +675,9 @@ void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
         auto t = high_resolution_clock::now();
         if(t >= timeout)
         {
-            rate_info.rate = ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + interval)) * 1e-9; // Gbps
-            rate_out << seq_num << ":" << rate_info.rate << " Gbps" << endl;
+            rate_info.rate = ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + interval)) * 1e-6; // Gbps
+            rate_out << seq_num << ":" << rate_info.rate << " Mbps" << endl;
+            cout << seq_num << ":" << rate_info.rate << " Mbps" << endl;
             rate_info.seq_num = ++seq_num;
             int ret = send(rate_sock, (char*)&rate_info, sizeof(rate_info), MSG_NOSIGNAL);
             if(ret == 0 || (ret < 0 && errno != EINTR))
@@ -687,6 +688,7 @@ void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
             }
             timeout = t + duration_cast<nanoseconds>(duration<double>(interval)); // 10ms timeout
             last_bytes = *bytes;
+	    cout << "send_byte: " << *bytes << " bytes" << endl;
         }
         else
             usleep(duration_cast<duration<double>>(timeout - t).count() * 1e6);

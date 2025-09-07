@@ -77,7 +77,7 @@ public:
     int setUpAddr(uint32_t local_addr, uint32_t remote_addr)
     {
         this->local_ip = local_addr;
-        this->remote_ip = remote_addr;
+        this->remote_ip = inet_addr("10.2.152.201"); //remote_addr;
         if(!this->local_ip || !this->remote_ip)
         {
             cout << "ERROR: wrong ip address string." << endl;
