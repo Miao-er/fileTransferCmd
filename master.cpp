@@ -15,7 +15,7 @@
 #include <librdkafka/rdkafkacpp.h>
 #include <nlohmann/json.hpp>  // 添加json库头文件
 using json = nlohmann::json;
-#define MAX_RATE 10.0
+#define MAX_RATE 100000.0
 #define DEBUG
 //#define READ_FROM_FILE
 
@@ -157,13 +157,13 @@ void parse_size(const char* size_str, uint64_t* size) {
     std::string str(size_str);
     if (str.back() == 'G' || str.back() == 'g') {
         str.pop_back();
-        *size = std::stoull(str) * 1000 * 1000 * 1000; // GB to bytes
+        *size = std::stoull(str) * 1024 * 1024 * 1024; // GB to bytes
     } else if (str.back() == 'M' || str.back() == 'm') {
         str.pop_back();
-        *size = std::stoull(str) * 1000 * 1000; // MB to bytes
+        *size = std::stoull(str) * 1024 * 1024; // MB to bytes
     } else if (str.back() == 'K' || str.back() == 'k') {
         str.pop_back();
-        *size = std::stoull(str) * 1000; // KB to bytes
+        *size = std::stoull(str) * 1024; // KB to bytes
     } else {
         *size = std::stoull(str); // bytes
     }
@@ -281,7 +281,7 @@ int collect_rate_info(RateCollector* collector, int rate_sock, int idx) {
             collector->rate_queue[true_seq_num - front_seq_num].ready = true;
             collector->queue_cv.notify_one();
         }
-        if(true_seq_num > idx * 100 + 5 && info.rate < 1e-5)
+        if(true_seq_num > idx * 100 + 5 && info.rate < 0)
         {
             collector->finished_count++;
             collector->finished_arr[idx] = true;

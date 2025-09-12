@@ -71,7 +71,7 @@ int StreamControl::createLucpContext()
     // create cp_channel
     comp_channel = ibv_create_comp_channel(hwrdma->ctx);
     // create cq
-    cq = ibv_create_cq(hwrdma->ctx, local_conf->getBlockNum(), NULL, comp_channel, 0);
+    cq = ibv_create_cq(hwrdma->ctx, 2 * local_conf->getBlockNum(), NULL, comp_channel, 0);
     if (!cq)
     {
         cout << "ERROR: Unable to create Completion Queue" << endl;
@@ -83,10 +83,10 @@ int StreamControl::createLucpContext()
     qp_init_attr.send_cq = cq;
     qp_init_attr.recv_cq = cq;
     qp_init_attr.cap.max_send_wr = local_conf->getBlockNum();
-    qp_init_attr.cap.max_recv_wr = local_conf->getBlockNum();
+    qp_init_attr.cap.max_recv_wr = 2 * local_conf->getBlockNum();
     qp_init_attr.cap.max_send_sge = 1;
     qp_init_attr.cap.max_recv_sge = 1;
-    qp_init_attr.qp_type = IBV_QPT_RC;
+    qp_init_attr.qp_type = IBV_QPT_UC;
 
     local_qp_info.lid = hwrdma->port_attr.lid;
     local_qp_info.block_num = local_conf->getBlockNum();
@@ -176,8 +176,8 @@ int StreamControl::changeQPState()
         qp_attr.path_mtu = hwrdma->port_attr.active_mtu,
         qp_attr.dest_qp_num = this->remote_qp_info.qp_num,
         qp_attr.rq_psn = 0,
-        qp_attr.max_dest_rd_atomic = 1,
-        qp_attr.min_rnr_timer = 0x12,
+        //qp_attr.max_dest_rd_atomic = 1,
+        //qp_attr.min_rnr_timer = 0x12,
         // qp_attr.ah_attr.is_global  = 0,
         qp_attr.ah_attr.dlid = this->remote_qp_info.lid,
         qp_attr.ah_attr.sl = 0,
@@ -194,8 +194,8 @@ int StreamControl::changeQPState()
         auto ret = ibv_modify_qp(qp, &qp_attr,
                                     IBV_QP_STATE | IBV_QP_AV |
                                         IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
-                                        IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
-                                        IBV_QP_MIN_RNR_TIMER);
+                                        IBV_QP_RQ_PSN );
+	//| IBV_QP_MAX_DEST_RD_ATOMIC IBV_QP_MIN_RNR_TIMER);
         if (ret != 0)
         {
             cout << "ERROR: Unable to set QP to RTR state!" << endl;
@@ -208,16 +208,16 @@ int StreamControl::changeQPState()
         struct ibv_qp_attr qp_attr;
         bzero(&qp_attr, sizeof(qp_attr));
         qp_attr.qp_state = IBV_QPS_RTS,
-        qp_attr.timeout = 20,
-        qp_attr.retry_cnt = 7,
-        qp_attr.rnr_retry = 0,
-        qp_attr.sq_psn = 0,
-        qp_attr.max_rd_atomic = 1;
+        //qp_attr.timeout = 20,
+        //qp_attr.retry_cnt = 7,
+        //qp_attr.rnr_retry = 0,
+        qp_attr.sq_psn = 0;
+        //qp_attr.max_rd_atomic = 1;
 
         auto ret = ibv_modify_qp(qp, &qp_attr,
-                                    IBV_QP_STATE | IBV_QP_TIMEOUT |
-                                        IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
-                                        IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC);
+                                    IBV_QP_STATE | IBV_QP_SQ_PSN); 
+                                      // | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT
+                                       // | IBV_QP_MAX_QP_RD_ATOMIC);
         if (ret != 0)
         {
             cout << "ERROR: Unable to set QP to RTS state!" << endl;
@@ -346,10 +346,11 @@ int StreamControl::postRecvFile()
     auto t_last_recv = t;
     double delta_io = 0,delta = 0;
     int recv_num = 0;
+    int recv_id = 0;
     this->rateController->runRecv();
     while(recv_bytes < remote_file_info.file_size)
     {
-        int n = ibv_poll_cq(cq, 1, wc);
+        int n = ibv_poll_cq(cq, 16, wc);
         if(n < 0)
         {
             cout << "ERROR: ibv_poll_cq returned " << n << " - closing connection";
@@ -357,11 +358,13 @@ int StreamControl::postRecvFile()
         }
         else if(n == 0) //std::this_thread::sleep_for(std::chrono::microseconds(1));
         {
-        /*    if( duration_cast<duration<double>>(high_resolution_clock::now() - t_last_recv).count() > 1.0)
+           if( duration_cast<duration<double>>(high_resolution_clock::now() - t_last_recv).count() > 1.0)
             {
-                cout << "ERROR: unfinished recv." << endl;
-                return 0;
-            }*/
+		    cout << "last_recv_id :" << recv_id << ", recv_bytes: " << recv_bytes << ", recv_num:" << recv_num << endl;
+                //cout << "ERROR: unfinished recv." << endl;
+                //return 0;
+		break;
+            }
         }
         else{
             //cout << n << endl;
@@ -377,6 +380,9 @@ int StreamControl::postRecvFile()
                 auto &buffer = buffers[wc[i].wr_id];
                 auto buff = std::get<0>(buffer);
                 recv_bytes += wc[i].byte_len;
+		//cout << "recv_bytes: " << recv_bytes << ", num: " << recv_num << endl;
+		//cout  << *(int*)(buff) << endl;
+		recv_id = *(int*)buff;
                 //cout << "receive rate: " << wc[i].byte_len * 8 /(delta * 1e9) <<"Gbps" <<endl;
                 // auto io_start = high_resolution_clock::now();
                 // write(recv_fd, (const char*)buff, wc[i].byte_len);
@@ -399,10 +405,10 @@ int StreamControl::postRecvFile()
         }
     }
     this->rateController->pauseRecv();
-    delta = duration_cast<duration<double>>(high_resolution_clock::now() - t).count();
+    delta = duration_cast<duration<double>>(t_last_recv - t).count();
     cout << "total recv_num: " << recv_num << endl;
     // cout << "I/O write rate: " << remote_file_info.file_size * 8/(delta_io * 1e9) << "Gbps" << endl;
-    cout << "recv rate: " << remote_file_info.file_size * 8/(delta * 1e9) << "Gbps" << endl;
+    cout << "recv rate: " << recv_bytes * 8/(delta * 1e9) << "Gbps" << endl;
     cout << "finish receive file:" << remote_file_info.file_path << "(" << (double)remote_file_info.file_size/1e9 << "GB)" << endl;
     return 0;
 }
@@ -694,7 +700,7 @@ void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
             usleep(duration_cast<duration<double>>(timeout - t).count() * 1e6);
     }
     rate_info.seq_num = ++seq_num;
-    rate_info.rate = 0;
+    rate_info.rate = -1;
     ret = send(rate_sock, (char*)&rate_info, sizeof(rate_info), MSG_NOSIGNAL);
     if(ret == 0 || (ret < 0 && errno != EINTR))
     {
