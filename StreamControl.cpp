@@ -3,6 +3,8 @@
 #include <string>
 #include <thread>
 #include <sys/stat.h>
+#include <deque>
+#include <algorithm>
 #include "StreamControl.h"
 #define NO_IO
 using std::chrono::high_resolution_clock;
@@ -86,11 +88,17 @@ int StreamControl::createLucpContext()
     qp_init_attr.cap.max_recv_wr = 2 * local_conf->getBlockNum();
     qp_init_attr.cap.max_send_sge = 1;
     qp_init_attr.cap.max_recv_sge = 1;
-    qp_init_attr.qp_type = IBV_QPT_UC;
+    if(this->use_message)
+        qp_init_attr.qp_type = IBV_QPT_UC;
+    else
+        qp_init_attr.qp_type = IBV_QPT_RC;
 
     local_qp_info.lid = hwrdma->port_attr.lid;
     local_qp_info.block_num = local_conf->getBlockNum();
-    local_qp_info.block_size = local_conf->getBlockSize();
+    if(this->use_message)
+        local_qp_info.block_size = local_conf->getBlockSize();
+    else
+        local_qp_info.block_size = 64;
     //local_qp_info.lucp_id = duration_cast<nanoseconds>(high_resolution_clock::now().time_since_epoch()).count(); //TODO
     // local_qp_info.recv_depth = qp_init_attr.cap.max_recv_wr; //must before create qp,or max_recv_wr will change.
     memcpy(local_qp_info.gid, &hwrdma->gid, 16);
@@ -175,10 +183,13 @@ int StreamControl::changeQPState()
         qp_attr.qp_state = IBV_QPS_RTR,
         qp_attr.path_mtu = hwrdma->port_attr.active_mtu,
         qp_attr.dest_qp_num = this->remote_qp_info.qp_num,
-        qp_attr.rq_psn = 0,
-        //qp_attr.max_dest_rd_atomic = 1,
-        //qp_attr.min_rnr_timer = 0x12,
-        // qp_attr.ah_attr.is_global  = 0,
+        qp_attr.rq_psn = 0;
+        if(!this->use_message)
+        {
+            qp_attr.max_dest_rd_atomic = 1,
+            qp_attr.min_rnr_timer = 0x12,
+            qp_attr.ah_attr.is_global = 0;
+        }
         qp_attr.ah_attr.dlid = this->remote_qp_info.lid,
         qp_attr.ah_attr.sl = 0,
         qp_attr.ah_attr.src_path_bits = 0,
@@ -188,14 +199,13 @@ int StreamControl::changeQPState()
         memcpy(&qp_attr.ah_attr.grh.dgid, remote_qp_info.gid, 16),
         qp_attr.ah_attr.grh.flow_label = 0,
         qp_attr.ah_attr.grh.hop_limit = 3, // TODO modify
-            qp_attr.ah_attr.grh.sgid_index = hwrdma->gid_idx,
+        qp_attr.ah_attr.grh.sgid_index = hwrdma->gid_idx,
         qp_attr.ah_attr.grh.traffic_class = 0;
 
         auto ret = ibv_modify_qp(qp, &qp_attr,
                                     IBV_QP_STATE | IBV_QP_AV |
                                         IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
-                                        IBV_QP_RQ_PSN );
-	//| IBV_QP_MAX_DEST_RD_ATOMIC IBV_QP_MIN_RNR_TIMER);
+                                        IBV_QP_RQ_PSN | (this->use_message ? 0:(IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER)));
         if (ret != 0)
         {
             cout << "ERROR: Unable to set QP to RTR state!" << endl;
@@ -207,17 +217,19 @@ int StreamControl::changeQPState()
     {
         struct ibv_qp_attr qp_attr;
         bzero(&qp_attr, sizeof(qp_attr));
-        qp_attr.qp_state = IBV_QPS_RTS,
-        //qp_attr.timeout = 20,
-        //qp_attr.retry_cnt = 7,
-        //qp_attr.rnr_retry = 0,
+        qp_attr.qp_state = IBV_QPS_RTS;
+        if(!this->use_message)
+        {
+            qp_attr.timeout = 20,
+            qp_attr.retry_cnt = 7,
+            qp_attr.rnr_retry = 0,
+            qp_attr.max_rd_atomic = 1;
+        }
         qp_attr.sq_psn = 0;
-        //qp_attr.max_rd_atomic = 1;
 
         auto ret = ibv_modify_qp(qp, &qp_attr,
-                                    IBV_QP_STATE | IBV_QP_SQ_PSN); 
-                                      // | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT
-                                       // | IBV_QP_MAX_QP_RD_ATOMIC);
+                                    IBV_QP_STATE | IBV_QP_SQ_PSN
+                                    | (this->use_message ? 0 : (IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT | IBV_QP_MAX_QP_RD_ATOMIC)));
         if (ret != 0)
         {
             cout << "ERROR: Unable to set QP to RTS state!" << endl;
@@ -264,7 +276,7 @@ int StreamControl::connectPeer()
     if(!this->server_mode)
         this->block_size = 1024UL * remote_qp_info.block_size;
     else
-        this->block_size = 1024UL * local_conf->getBlockSize();
+        this->block_size = 1024UL * (this->use_message? local_conf->getBlockSize() : 64);
     this->rateController = new RateController(this->default_rate, this->block_size);
     if(this->rateController->initSwap(hwrdma->bind_ip, this->peer_addr) < 0)
     {
@@ -317,6 +329,13 @@ int StreamControl::prepareRecv()
     }
     return 0;
 }
+
+struct recv_item
+{
+    uint32_t seq;
+    bool recved;
+    recv_item(uint32_t _seq, bool _recved):seq(_seq), recved(_recved){}
+};
 int StreamControl::postRecvFile()
 {
     FileInfo file_info, remote_file_info;
@@ -341,14 +360,23 @@ int StreamControl::postRecvFile()
         cout << "WARNING: remote not ready to send." << endl;
         return 0;
     }
+    cout << "use_message: " << this->use_message << endl;
     uint64_t recv_bytes = 0;
     auto t = high_resolution_clock::now();
     auto t_last_recv = t;
     double delta_io = 0,delta = 0;
     int recv_num = 0;
-    int recv_id = 0;
+    uint32_t recv_id = 0;
+    uint32_t expect_seq = 0;
+    uint32_t restran_size = sizeof(uint32_t); 
+    int64_t recv_max_seq = -1;
+    uint32_t numsOfBlocks = remote_file_info.file_size / this->block_size + ((remote_file_info.file_size % this->block_size == 0) ? 0 : 1);
     this->rateController->runRecv();
-    while(recv_bytes < remote_file_info.file_size)
+    std::deque<recv_item> unrecv_packet_seqs;
+    unrecv_packet_seqs.clear();
+    bool start_restran = false, first_restran = true;
+    char * restran_space = nullptr;
+    while(expect_seq < numsOfBlocks)
     {
         int n = ibv_poll_cq(cq, 16, wc);
         if(n < 0)
@@ -360,17 +388,17 @@ int StreamControl::postRecvFile()
         {
            if( duration_cast<duration<double>>(high_resolution_clock::now() - t_last_recv).count() > 1.0)
             {
-		    cout << "last_recv_id :" << recv_id << ", recv_bytes: " << recv_bytes << ", recv_num:" << recv_num << endl;
+		        cout << "last_recv_id :" << recv_id << ", recv_num:" << recv_num << ", numOfBlocks:" << numsOfBlocks << ", expect_seq:" << expect_seq << endl;
                 //cout << "ERROR: unfinished recv." << endl;
                 //return 0;
-		break;
+                if(this->use_message)
+                    start_restran = true;
             }
         }
         else{
             //cout << n << endl;
             for (int i = 0; i < n; i++)
             {
-                recv_num ++;
                 t_last_recv = high_resolution_clock::now();
                 if (wc[i].status != IBV_WC_SUCCESS || wc[i].opcode != IBV_WC_RECV)
                 {
@@ -382,28 +410,130 @@ int StreamControl::postRecvFile()
                 recv_bytes += wc[i].byte_len;
 		//cout << "recv_bytes: " << recv_bytes << ", num: " << recv_num << endl;
 		//cout  << *(int*)(buff) << endl;
-		recv_id = *(int*)buff;
+		        recv_id = *(uint32_t*)buff;
+                postRecvWr(wc[i].wr_id);
+                if(recv_id < expect_seq)
+                    continue;
+                if(recv_id == expect_seq)
+                {
+                    if(expect_seq > recv_max_seq)
+                    {
+                        expect_seq ++;
+                        recv_max_seq = recv_id;
+                    }
+                    else
+                    {
+                        cout << "expect_seq:" << expect_seq << ", recv_max_seq:" << recv_max_seq << endl;
+                        assert(expect_seq != recv_max_seq);
+                        assert(!unrecv_packet_seqs.empty());
+                        assert(unrecv_packet_seqs[0].seq == recv_id);
+                        unrecv_packet_seqs[0].recved = true;
+                        while(!unrecv_packet_seqs.empty() && unrecv_packet_seqs[0].recved == true)
+                        {
+                            unrecv_packet_seqs.pop_front();
+                            expect_seq ++;
+                        }
+                    }
+                }
+                else
+                {
+                    if(recv_id < recv_max_seq)
+                    {
+                        assert(!unrecv_packet_seqs.empty());
+                        if(unrecv_packet_seqs[recv_id -expect_seq].recved)
+                            continue;
+                        unrecv_packet_seqs[recv_id - expect_seq].recved = true;
+                    }
+                    else if(recv_id > recv_max_seq)
+                    {
+                        //cout << "recv_id:" << recv_id << ", recv_max_seq:" << recv_max_seq << endl;
+                        for(uint32_t i = recv_max_seq + 1; i < recv_id; i++)
+                        {
+                            unrecv_packet_seqs.emplace_back(i, false);
+                        }
+                        unrecv_packet_seqs.emplace_back(recv_id, true);
+                        recv_max_seq = recv_id;
+                    }
+                }
+                recv_num ++;
                 //cout << "receive rate: " << wc[i].byte_len * 8 /(delta * 1e9) <<"Gbps" <<endl;
                 // auto io_start = high_resolution_clock::now();
                 // write(recv_fd, (const char*)buff, wc[i].byte_len);
-                postRecvWr(wc[i].wr_id);
-                // auto io_end = high_resolution_clock::now();
-                // double delta_io_ = duration_cast<duration<double>>(io_end - io_start).count();
-                //cout << "write rate: " << wc[i].byte_len * 8 /(delta_io_ * 1e9) <<"Gbps" <<endl;
-                // delta_io += delta_io_;
-                // delta += delta_;
-                // if(recv_num > 0 && (recv_num % local_qp_info.recv_depth == 0)) //all wqe is in free state
-                int rc;
-                sync_char = 'A';
-                // while((rc = send(this->peer_fd, (char*)&sync_char, 1, MSG_NOSIGNAL)) <= 0)
-                // {
-                //     if (rc == 0 || (rc < 0 && errno != EINTR))
-                //         return -2;
-                // }
-
+            }
+        }
+        //cout << "recv_max_seq:" << recv_max_seq << ", numOfBlocks:" << numsOfBlocks << endl;
+        //当最后几个包丢弃时，加判断
+        if(use_message)
+        {
+            if(first_restran && (recv_max_seq == numsOfBlocks - 1 || start_restran))
+            {
+                uint32_t unrecv_num = numsOfBlocks - recv_num, loc = sizeof(uint32_t);
+                restran_size = (unrecv_num + 1) * sizeof(uint32_t);
+                restran_space = new char[restran_size];
+                memcpy(restran_space, &unrecv_num, sizeof(uint32_t));
+                if(recv_max_seq < numOfBlocks - 1)
+                {
+                    for(uint32_t i = recv_max_seq + 1; i < numOfBlock; i++)
+                    {
+                        unrecv_packet_seqs[i].emplace_back(i, false);
+                    }
+                }
+                for(int i = 0; i < unrecv_packet_seqs.size(); i ++)
+                {
+                    if(unrecv_packet_seqs[i].recved == false)
+                    {
+                        memcpy(restran_space + loc, &unrecv_packet_seqs[i].seq, sizeof(uint32_t));
+                        loc += sizeof(uint32_t);
+                    }
+                    if(loc == restran_size)
+                        break;
+                }
+                first_restran = false;
+                t_last_recv = high_resolution_clock::now();
+                start_restran = true;
+            }
+            else if(start_restran || expect_seq == numsOfBlocks)
+            {
+                uint32_t unrecv_num = numsOfBlocks - recv_num, loc = sizeof(uint32_t);
+                restran_size = (unrecv_num + 1) * sizeof(uint32_t);
+                memcpy(restran_space, &unrecv_num, sizeof(uint32_t));
+                for(int i = 0; i < unrecv_packet_seqs.size(); i ++)
+                {
+                    if(unrecv_packet_seqs[i].recved == false)
+                    {
+                        memcpy(restran_space + loc, &unrecv_packet_seqs[i].seq, sizeof(uint32_t));
+                        loc += sizeof(uint32_t);
+                    }
+                    if(loc == restran_size)
+                        break;
+                }
+                t_last_recv = high_resolution_clock::now();
+                start_restran = true;
+            }
+            if(start_restran)
+            {
+                uint32_t loc = 0;
+                int rc = 0;
+                while(loc < restran_size)
+                {
+                    rc = send(this->peer_fd,restran_space + loc, restran_size - loc, MSG_NOSIGNAL);
+                    if (rc == 0 || (rc < 0 && errno != EINTR))
+                    {
+                        cout << "ERROR: Failed writing data during start_restran." << endl;
+                        cout << "errno: " << errno << endl;
+                        cout << "strerror: " << strerror(errno) << endl;
+                        cout << "rc: " << rc << endl;
+                        return -2;
+                    }
+                    loc += rc;
+                }
+                cout << "restran " << *(uint32_t*)restran_space << " packets" << endl;
+                start_restran = false;
             }
         }
     }
+    if(restran_space != nullptr)
+        delete[] restran_space;
     this->rateController->pauseRecv();
     delta = duration_cast<duration<double>>(t_last_recv - t).count();
     cout << "total recv_num: " << recv_num << endl;
@@ -458,8 +588,9 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
 
     auto buff_size = std::get<1>(buffers[0]);
     sge.addr = (uint64_t)std::get<0>(buffers[0]);
+    *(uint32_t*)(sge.addr) = 0; 
     wr.wr_id = 0;
-    auto bytes_payload = buff_size < bytes_left ? buff_size : bytes_left;
+    auto bytes_payload = buff_size; // < bytes_left ? buff_size : bytes_left;
     sge.length = bytes_payload;
 
     // bool unread = false;
@@ -474,6 +605,10 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
         return 0;
     }
     int remaining_recv_wqe = remote_qp_info.block_num;
+    bool recv_finished = false, start_restran = false, first_restran = true;
+    uint32_t restran_num = 0, restran_size = 0, restraned_num = 0;
+    uint32_t numsOfBlocks = file_size / this->block_size + ((file_size % this->block_size == 0) ? 0 : 1);
+    char* restran_space = nullptr;
     auto t1 = high_resolution_clock::now();
     auto t2 = t1, t_io = t1;
     int count = 0;
@@ -483,38 +618,67 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
     std::thread statistic_thread(statistic, &ack_bytes, bytes_left, rate_sock);
     while (1)
     { 
-        // if (unread)
-	//cout << "before--" << this->rateController->getRate() << endl;
-        if(this->use_message && this->rateController->getRate() == 0.0) continue;
-	// else cout << "rate: " << this->rateController->getRate() << endl;
+        // cout << "try to recv restran" << endl;
+        if(this->use_message)
         {
-            // while(1)
-            // {
-            //     int nb = recv(this->peer_fd, &sync_char, 1, MSG_DONTWAIT);
-            //     if(nb == 0) return -2;
-            //     else if(nb < 0 && errno == EWOULDBLOCK)
-            //         break;
-            //     else if(nb < 0 && errno == EINTR)
-            //         continue;
-            //     else if(nb < 0)
-            //         return -2;
-            //     else 
-            //     {
-            //         // cout << "sync_char: " << sync_char << endl;
-            //         assert(sync_char == 'A');
-            //         remaining_recv_wqe++;
-            //         break;
-            //     }
-            // }
+            int rc = recv(this->peer_fd, &restran_num, sizeof(uint32_t), MSG_DONTWAIT);
+            if(rc < 0 && (errno == EWOULDBLOCK || errno == EINTR));
+            else if(rc <= 0) 
+            {
+                cout << "ERROR: Failed writing data during start_restran." << endl;
+                cout << "errno: " << errno << endl;
+                cout << "strerror: " << strerror(errno) << endl;
+                cout << "rc: " << rc << endl;
+                return -2;
+            }
+            else
+            {
+                assert(rc == sizeof(uint32_t));
+                cout << "start restran " << restran_num << " packets" << endl;
+                if(restran_num == 0)
+                    recv_finished = true;
+                else
+                {
+                    assert(start_restran == false);
+                    if(first_restran == true)
+                    {
+                        restran_space = new char[restran_num * sizeof(uint32_t)];
+                        first_restran = false;
+                    }
+                    uint32_t loc = 0;
+                    restran_size = restran_num * sizeof(uint32_t);
+                    while(loc < restran_size)
+                    {
+                        rc = recv(this->peer_fd, restran_space + loc, restran_size - loc, 0);
+                        if(rc == 0 || (rc < 0 && errno != EINTR))
+                        {
+                            cout << "ERROR: Failed writing data during start_restran." << endl;
+                            cout << "errno: " << errno << endl;
+                            cout << "strerror: " << strerror(errno) << endl;
+                            cout << "rc: " << rc << endl;
+                            return -2;
+                        }
+                        loc += rc;
+                    }
+                    start_restran = true;
+                    *(uint32_t*)(sge.addr) = *(uint32_t*)restran_space;
+                    assert(bytes_left == 0);
+                    bytes_left += restran_num * this->block_size;
+                    restraned_num = 0;
+                }
+            }
+            if(recv_finished) break;
         }
+        if(this->use_message && this->rateController->getRate() == 0.0) continue;
         if(this->use_message && !this->rateController->timeToSend());
-        // else if(remaining_recv_wqe > 0)
         else
         {
+            // cout << "try to send" << endl;
+            if(this->use_message && !start_restran && bytes_left == 0) continue; 
             // Calculate bytes to be sent in this buffer
-            t_io = high_resolution_clock::now();
+           //_io = high_resolution_clock::now();
             // read(fd, (char *)sge.addr, bytes_payload);
-            duration_io += duration_cast<duration<double>>(high_resolution_clock::now() - t_io).count();
+            //duration_io += duration_cast<duration<double>>(high_resolution_clock::now() - t_io).count();
 
             auto ret = ibv_post_send(qp, &wr, &bad_wr);
             uncomplete_bytes.push_back(bytes_payload); 
@@ -535,14 +699,24 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
             auto buff_size = std::get<1>(buffer);
             sge.addr = (uint64_t)buff;
             wr.wr_id = id;
-            bytes_payload = buff_size < bytes_left ? buff_size : bytes_left;
+            bytes_payload = buff_size; // < bytes_left ? buff_size : bytes_left;
             sge.length = bytes_payload;
+            if(this->use_message && start_restran)
+            {
+                restraned_num += 1;
+                if(restraned_num < restran_num)
+                    *(uint32_t*)(sge.addr) = *(uint32_t*)(restran_space + restraned_num * sizeof(uint32_t));
+                else
+                    start_restran = false;
+            }
+            else
+                *(uint32_t*)(sge.addr) = sendcnt;
             // if((i % this->remote_qp_info.recv_depth) == 0) unread = true; //wait for sync
         }
         
         do
         {
-            int n = ibv_poll_cq(cq,1, wc);
+            int n = ibv_poll_cq(cq,16, wc);
             // cout << Noutstanding_writes << endl;
             // cout << n << endl;
             if (n < 0)
@@ -560,7 +734,7 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
                                 wc[i].status, wc[i].vendor_err);
                         return -1;
                     }
-                    compcnt++;
+                    //compcnt++;
                     Noutstanding_writes--;
                     ack_bytes += uncomplete_bytes.front();
                     t1 = t2;
@@ -572,8 +746,10 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
                 }
             }
         } while (Noutstanding_writes >= buffers.size() || (bytes_left == 0 && Noutstanding_writes > 0));
-        if(bytes_left == 0) break;
+        if(!this->use_message && bytes_left == 0) break;
     }
+    if(restran_space != nullptr)
+        delete[] restran_space;
     statistic_thread.join();
     this->rateController->pauseSend();
     t2 = high_resolution_clock::now();
@@ -581,18 +757,18 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
 
     // duration<double> delta_t = duration_cast<duration<double>>(t2 - t1);
     double rate_Gbps = (double)file_info.file_size/ duration_time * 8.0 / 1.0E9;
-    double rate_io_Gbps = (double)file_info.file_size / duration_io * 8.0 / 1.0E9;
+    //double rate_io_Gbps = (double)file_info.file_size / duration_io * 8.0 / 1.0E9;
     // cout << duration_cast<duration<double>>(t2 - t1).count() <<  "sec" << endl;
 #ifndef DEBUG
     if (file_info.file_size > 2E8)
     {
         cout << "  Transferred " << (((double)file_info.file_size) * 1.0E-9) << " GB in " << duration_time << " sec  (" << rate_Gbps << " Gbps)" << endl;
-        cout << "  I/O rate reading from file: " << duration_io << " sec  (" << rate_io_Gbps << " Gbps)" << endl;
+        //cout << "  I/O rate reading from file: " << duration_io << " sec  (" << rate_io_Gbps << " Gbps)" << endl;
     }
     else
     {
         cout << "  Transferred " << (((double)file_info.file_size) * 1.0E-6) << " MB in " << duration_time << " sec  (" << rate_Gbps * 1000.0 << " Mbps)" << endl;
-        cout << "  I/O rate reading from file: " << duration_io << " sec  (" << rate_io_Gbps * 1000.0 << " Mbps)" << endl;
+        //cout << "  I/O rate reading from file: " << duration_io << " sec  (" << rate_io_Gbps * 1000.0 << " Mbps)" << endl;
     }
 #endif
 
@@ -637,12 +813,16 @@ int StreamControl::postRecvWr(uint64_t id)
 
 int recvData(HwRdma *hwrdma, int peer_fd,  LocalConf* local_conf, ClientList* client_list)
 {
-    StreamControl stream_control(hwrdma, peer_fd, local_conf,  client_list->getClientInfo(peer_fd).ip, true);
     std::shared_ptr<int> x(NULL, [&](int *)
                            {    
                                 close(peer_fd); 
                                 client_list->removeClient(peer_fd);
                             });
+    char use_message_str = 'Y';
+    int rc = recv(peer_fd,&use_message_str, 1, 0);
+    if(rc == 0 || (rc < 0 && errno != EINTR)) return -1;
+    cout << "recv str " << use_message_str << endl;
+    StreamControl stream_control(hwrdma, peer_fd, local_conf,  client_list->getClientInfo(peer_fd).ip, true, use_message_str == 'Y'? true : false);
     if (stream_control.createLucpContext())
         return -1;
     if (stream_control.connectPeer())
@@ -694,7 +874,7 @@ void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
             }
             timeout = t + duration_cast<nanoseconds>(duration<double>(interval)); // 10ms timeout
             last_bytes = *bytes;
-	    cout << "send_byte: " << *bytes << " bytes" << endl;
+	    //cout << "send_byte: " << *bytes << " bytes" << endl;
         }
         else
             usleep(duration_cast<duration<double>>(timeout - t).count() * 1e6);

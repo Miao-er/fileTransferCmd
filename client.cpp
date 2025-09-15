@@ -68,6 +68,9 @@ void handle_transfer(cmd_info cmd_info, bool use_message, int rate_sock) {
         return;
     }
     std::shared_ptr<int> x(NULL, [&](int *){close(sockfd);});
+    char use_message_str = (use_message ? 'Y' : 'N'); 
+    int rc = send(sockfd, &use_message_str, 1, 0);
+    if(rc == 0 || (rc < 0 && errno != EINTR)) return;
     StreamControl stream_control(&hwrdma, sockfd, &local_conf, addr.sin_addr.s_addr, false, use_message);
     if (stream_control.createLucpContext())
         return;
