@@ -15,10 +15,15 @@
 #include <librdkafka/rdkafkacpp.h>
 #include <nlohmann/json.hpp>  // 添加json库头文件
 using json = nlohmann::json;
-#define MAX_RATE 10.0
+#define MAX_RATE 8900.0
 #define DEBUG
+//#define READ_FROM_FILE
+
 #define LOG_ERR_FILE
+
+#ifndef READ_FROM_FILE
 #define LOG_RATE_FILE
+#endif
 
 #ifdef LOG_ERR_FILE
     std::ofstream err_log("error.log");
@@ -95,7 +100,7 @@ struct RateInfo
 {
     uint32_t seq_num;
     double rate;
-    RateInfo() : seq_num(0), rate(-1.0){}
+    RateInfo() : seq_num(0), rate(-2.0){}
 };
 struct RateQueueElem {
     std::vector<RateInfo> rates;
@@ -143,8 +148,8 @@ struct cmd_info
     double delay; // in seconds
 };
 void parse_size(const char* size_str, uint64_t* size) {
-    if (size_str == nullptr || size == nullptr) 
-    {   
+    if (size_str == nullptr || size == nullptr)
+    {
         *size = (uint64_t) -1; // Invalid size
         return;
     }
@@ -152,21 +157,21 @@ void parse_size(const char* size_str, uint64_t* size) {
     std::string str(size_str);
     if (str.back() == 'G' || str.back() == 'g') {
         str.pop_back();
-        *size = std::stoull(str) * 1000 * 1000 * 1000; // GB to bytes
+        *size = std::stoull(str) * 1024 * 1024 * 1024; // GB to bytes
     } else if (str.back() == 'M' || str.back() == 'm') {
         str.pop_back();
-        *size = std::stoull(str) * 1000 * 1000; // MB to bytes
+        *size = std::stoull(str) * 1024 * 1024; // MB to bytes
     } else if (str.back() == 'K' || str.back() == 'k') {
         str.pop_back();
-        *size = std::stoull(str) * 1000; // KB to bytes
+        *size = std::stoull(str) * 1024; // KB to bytes
     } else {
         *size = std::stoull(str); // bytes
     }
 }
 
 void parse_delay(const char* delay_str, double* delay) {
-    if (delay_str == nullptr || delay == nullptr) 
-    {   
+    if (delay_str == nullptr || delay == nullptr)
+    {
         *delay = -1; // Invalid delay
         return;
     }
@@ -229,9 +234,12 @@ void check_and_send_thread(RateCollector* collector, KafkaProducer& producer) {
         float total_rate = 0.0;
         for (size_t i = 0; i < elem.rates.size(); ++i) {
             std::string key = "task_" + std::to_string(i + 1) + "_rate";
-            if (elem.rates[i].rate < 0) {
+            if (elem.rates[i].rate < -1.5) {
                 j_obj[key] = nullptr;
-            } else {
+            } else if(elem.rates[i].rate < -0.5) {
+                j_obj[key] = 0.0;
+            } else
+            {
                 j_obj[key] = elem.rates[i].rate;
                 total_rate += elem.rates[i].rate;
             }
@@ -276,7 +284,7 @@ int collect_rate_info(RateCollector* collector, int rate_sock, int idx) {
             collector->rate_queue[true_seq_num - front_seq_num].ready = true;
             collector->queue_cv.notify_one();
         }
-        if(true_seq_num > idx * 100 + 5 && info.rate < 1e-5)
+        if(true_seq_num > idx * 100 + 5 && info.rate < 0)
         {
             collector->finished_count++;
             collector->finished_arr[idx] = true;
@@ -392,7 +400,7 @@ public:
         }
 #endif
     }
-#ifndef DEBUG   
+#ifndef DEBUG
     void consume(KafkaProducer& producer) {
         while (true) {
             RdKafka::Message* msg = _consumer->consume(1000);  // 超时时间 1000ms
@@ -413,9 +421,39 @@ public:
                         auto j = json::parse(payload);
                         bool dcqcn_enable = j.value("DCQCN_ENABLE", false);
                         bool start_transfer = j.value("START_TRANSFER", false);
-                        int status;
                         std::cout << "DCQCN_ENABLE: " << std::boolalpha << dcqcn_enable
                                   << ", START_TRANSFER: " << std::boolalpha << start_transfer << std::endl;
+#ifdef READ_FROM_FILE
+                        if(!start_transfer) break;
+                        std::string json_file_path;
+                        if(dcqcn_enable)
+                            json_file_path =  "rate_dcqcn.log";
+                        else
+                            json_file_path = "rate_lucp.log";
+                        std::ifstream json_file(json_file_path);
+                        if (!json_file) {
+                            std::cerr << "Failed to open JSON file: " << json_file_path << std::endl;
+                            return;
+                        }
+                        std::string line;
+                        std::vector<std::string> list_name = {"task_1_rate", "task_2_rate", "task_3_rate", "total_rate"};
+                        while (std::getline(json_file, line)) {
+                            // 处理每一行
+                            if(line.empty()) continue;
+                            auto rate_j = json::parse(line);
+                            for(auto & name : list_name) {
+                                if (!rate_j[name].is_null()) {
+                                    double rate = rate_j[name];
+                                    rate = rate / 5;
+                                    rate_j[name] = rate;
+                                }
+                            }
+                            producer.send(rate_j);
+                            usleep(10000);  // 休眠 10ms
+                        }
+			std::cout << "finish send rate." << std::endl;
+#else
+                        int status;
                         if (dcqcn_enable) {
                             status = processCMD("bash ./dcqcn.sh enable");
                         } else {
@@ -442,8 +480,8 @@ public:
                             }
                             for (auto& t : threads) t.join();
                             checker.join();
-
                         }
+#endif
                     } catch (const std::exception& e) {
                         ERR_LOG("JSON parse error: " << e.what());
                     }
@@ -483,8 +521,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    KafkaConsumer consumer("223.193.6.110:9092", "sm-group");
-    KafkaProducer producer("223.193.6.110:9092");
+    KafkaConsumer consumer("10.2.150.114:9092", "sm-group");
+    KafkaProducer producer("10.2.150.114:9092");
     consumer.subscribe({"transmission_task"});
     producer.set_topic("transmission_task_status");
 #ifndef DEBUG

@@ -10,13 +10,15 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <cmath>
+#include <algorithm>
 #include <condition_variable>
 #include <atomic>
 #include <librdkafka/rdkafkacpp.h>
 #include <nlohmann/json.hpp>  // 添加json库头文件
 using json = nlohmann::json;
-#define MAX_RATE 100000.0
-#define DEBUG
+#define MAX_RATE 9000.0
+//#define DEBUG
 //#define READ_FROM_FILE
 
 #define LOG_ERR_FILE
@@ -41,10 +43,96 @@ using json = nlohmann::json;
     #define RESET_LOG()
 #endif
 
+void caculator_factor(double& fairness, double& stability) 
+{
+    std::ifstream read_rate("rate.log");
+    std::string line;
+    std::vector<std::string> list_name = {"task_1_rate", "task_2_rate", "task_3_rate"};
+    std::vector<double> list_rate;
+
+    int fairness_count = 0;
+    double fairness_sum = 0;
+
+    std::deque<double> rate_1, rate_2, rate_3;
+    rate_1.clear();
+    rate_2.clear();
+    rate_3.clear();
+    std::deque<double>* list_rate_ptr[3];
+    list_rate_ptr[0] = &rate_1;
+    list_rate_ptr[1] = &rate_2;
+    list_rate_ptr[2] = &rate_3;
+    std::vector<double> list_osci;
+    double stab_list_sum[3] = {0};
+    int stab_list_count[3] = {0};
+    double stab_sum_rate[3] = {0};
+    const int w_size = 100;
+    while (std::getline(read_rate, line)) {
+        // 处理每一行
+        if(line.empty()) continue;
+        double fairness_short_sum = 0, fairness_short_pow_sum = 0;
+        int fairness_short_count = 0;
+        int idx = 0;
+        auto rate_j = json::parse(line);
+        for(auto & name : list_name) {
+            list_osci.clear();
+            if (!rate_j[name].is_null()) {
+                double rate_value = rate_j[name];
+                if(rate_value > 0)
+                {
+                    //for fairness
+                    fairness_short_count += 1;
+                    fairness_short_sum += rate_value;
+                    fairness_short_pow_sum += rate_value * rate_value;
+                    //for stability
+                    list_rate_ptr[idx]->push_back(rate_value);
+                    stab_sum_rate[idx] += rate_value;
+                    if(list_rate_ptr[idx]->size() > w_size)
+                    {
+                        stab_sum_rate[idx] -= list_rate_ptr[idx]->at(0);
+                        list_rate_ptr[idx]->pop_front();
+                    }
+                    if(list_rate_ptr[idx]->size() < w_size)
+                    {
+                        idx++;
+                        continue;
+                    }
+                    for(int i = 1; i < list_rate_ptr[idx]->size(); i++)
+                        list_osci.push_back(std::abs(list_rate_ptr[idx]->at(i) - list_rate_ptr[idx]->at(i - 1)));
+                    std::sort(list_osci.begin(), list_osci.end());
+                    double osci_median = list_osci[(w_size - 1)/2];
+                    double aver_rate = stab_sum_rate[idx] / w_size;
+                    double stab_short = osci_median / std::max(1e-6, aver_rate);
+                    stab_list_sum[idx] += stab_short;
+                    stab_list_count[idx] += 1;
+                }
+            }
+            idx++;
+        }
+        if(fairness_short_count >= 2)
+        {
+            fairness_count += 1;
+            fairness_sum += fairness_short_sum * fairness_short_sum / (fairness_short_pow_sum * fairness_short_count);
+        }
+    }
+    if(fairness_count > 0)
+    {
+        fairness = fairness_sum / fairness_count;
+	fairness = std::max(0.0, (fairness - 1/3.0) / (2/3.0));
+    }
+    for(int i = 0; i < 3; i ++)
+    {
+        if(stab_list_count[i] > 0)
+            stab_list_sum[i] /= stab_list_count[i];
+        stab_list_sum[i] = std::exp(-1 * stab_list_sum[i] / 0.1);
+        stability += stab_list_sum[i];
+    }
+    stability /= 3;
+    read_rate.close();
+}
+
 class KafkaProducer {
 public:
     KafkaProducer(const std::string& brokers) {
-        RESET_LOG();
 #ifndef DEBUG
         RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
         std::string errstr;
@@ -82,7 +170,6 @@ public:
 #endif
         RATE_LOG(payload);
     }
-
     ~KafkaProducer() {
 #ifndef DEBUG
         _producer->flush(1000);
@@ -100,7 +187,7 @@ struct RateInfo
 {
     uint32_t seq_num;
     double rate;
-    RateInfo() : seq_num(0), rate(-1.0){}
+    RateInfo() : seq_num(0), rate(-2.0){}
 };
 struct RateQueueElem {
     std::vector<RateInfo> rates;
@@ -234,15 +321,31 @@ void check_and_send_thread(RateCollector* collector, KafkaProducer& producer) {
         float total_rate = 0.0;
         for (size_t i = 0; i < elem.rates.size(); ++i) {
             std::string key = "task_" + std::to_string(i + 1) + "_rate";
-            if (elem.rates[i].rate < 0) {
+            if (elem.rates[i].rate < -1.5) {
                 j_obj[key] = nullptr;
-            } else {
-                j_obj[key] = elem.rates[i].rate;
-                total_rate += elem.rates[i].rate;
+            } else if(elem.rates[i].rate < -0.5) {
+                j_obj[key] = 0.0;
+            } else
+            {
+                j_obj[key] = elem.rates[i].rate / 1000.0;
+                total_rate += elem.rates[i].rate / 1000.0;
             }
         }
-        j_obj["total_rate"] = total_rate > MAX_RATE ? MAX_RATE : total_rate; // 限制总速率
-        j_obj["timepoint"] = elem.seq_num;
+        j_obj["total_rate"] = total_rate > MAX_RATE/1000.0 ? MAX_RATE/1000.0 : total_rate; // 限制总速率
+        j_obj["timepoint"] = (double)elem.seq_num / 100.0;
+        if(collector->finished_count.load() == collector->client_num && collector->rate_queue.size() == 1)
+        {
+            double fairness = 0, stability = 0;
+            caculator_factor(fairness,stability);
+            j_obj["fairness"] = fairness;
+            j_obj["stability"] = stability;
+        }
+        else
+        {
+            j_obj["fairness"] = nullptr;
+            j_obj["stability"] = nullptr;
+        }
+
         collector->rate_queue.pop_front();
         lock.unlock();
         producer.send(j_obj);
@@ -358,6 +461,7 @@ int processCMD(std::string cmd)
     while (fgets(buffer, sizeof(buffer), fp)) {
         output += buffer;
     }
+    std::cout << output << std::endl;
     int status = pclose(fp);
     if (status != 0) {
         std::cerr << "[#Err]" << output;
@@ -424,9 +528,9 @@ public:
                         if(!start_transfer) break;
                         std::string json_file_path;
                         if(dcqcn_enable)
-                            json_file_path =  "rate_dcqcn.log";
+                            json_file_path =  "rate.log";
                         else
-                            json_file_path = "rate_lucp.log";
+                            json_file_path = "rate.log";
                         std::ifstream json_file(json_file_path);
                         if (!json_file) {
                             std::cerr << "Failed to open JSON file: " << json_file_path << std::endl;
@@ -438,13 +542,6 @@ public:
                             // 处理每一行
                             if(line.empty()) continue;
                             auto rate_j = json::parse(line);
-                            for(auto & name : list_name) {
-                                if (!rate_j[name].is_null()) {
-                                    double rate = rate_j[name];
-                                    rate = rate / 5;
-                                    rate_j[name] = rate;
-                                }
-                            }
                             producer.send(rate_j);
                             usleep(10000);  // 休眠 10ms
                         }
@@ -452,9 +549,11 @@ public:
 #else
                         int status;
                         if (dcqcn_enable) {
-                            status = processCMD("bash ./dcqcn.sh enable");
+                            status = processCMD("bash ~/fileTransferCmd/dcqcn.sh enable");
+                            //system("bash ~/fileTransferCmd/dcqcn.sh enable");
                         } else {
-                            status = processCMD("bash ./dcqcn.sh disable");
+                            status = processCMD("bash ~/fileTransferCmd/dcqcn.sh disable");
+                            //system("bash ~/fileTransferCmd/dcqcn.sh disable");
                         }
                         if(status != 0) {
                             std::cerr << "Failed to execute command." << std::endl;
@@ -462,6 +561,7 @@ public:
                         }
                         if(start_transfer)
                         {
+                            RESET_LOG();
                             RateCollector collector;
                             collector.finished = false;
                             collector.finished_count = 0;

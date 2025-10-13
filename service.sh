@@ -7,7 +7,13 @@ if [ "$1" != "start" ] && [ "$1" != "stop" ]; then
     echo "Invalid argument: $1. Use 'start' or 'stop'."
     exit 1
 fi
-
+if [ "$1" == "start" ]; then
+	sshpass -p "123456" ssh sw2@10.2.152.201 "cd /home/sw2/fileTransferCmd; sudo ./switch switch2.conf > /dev/null 2>&1 &"
+	echo "switch service start."
+elif [ "$1" == "stop" ]; then
+	sshpass -p "123456" ssh sw2@10.2.152.201 "sudo killall -e switch"
+	echo "switch service stop."
+fi
 # ip_list=(192.168.11.2 192.168.12.2 192.168.13.2 192.168.21.2 192.168.22.2 192.168.23.2)
 ip_list=(10.2.229.111 10.2.229.121 10.2.229.131 10.2.152.211 10.2.152.221 10.2.152.231)
 user_list=(server1 server2 server3 server4 server5 server6)

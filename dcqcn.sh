@@ -1,3 +1,4 @@
+#!bin/bash
 value=1
 if [ $1 == "enable" ]; then
     value=1

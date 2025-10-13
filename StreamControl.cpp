@@ -370,13 +370,13 @@ int StreamControl::postRecvFile()
     uint32_t expect_seq = 0;
     uint32_t restran_size = sizeof(uint32_t); 
     int64_t recv_max_seq = -1;
-    uint32_t numsOfBlocks = remote_file_info.file_size / this->block_size + ((remote_file_info.file_size % this->block_size == 0) ? 0 : 1);
+    uint32_t numOfBlocks = remote_file_info.file_size / this->block_size + ((remote_file_info.file_size % this->block_size == 0) ? 0 : 1);
     this->rateController->runRecv();
     std::deque<recv_item> unrecv_packet_seqs;
     unrecv_packet_seqs.clear();
     bool start_restran = false, first_restran = true;
     char * restran_space = nullptr;
-    while(expect_seq < numsOfBlocks)
+    while(recv_num < numOfBlocks)//expect_seq < numOfBlocks)
     {
         int n = ibv_poll_cq(cq, 16, wc);
         if(n < 0)
@@ -388,7 +388,7 @@ int StreamControl::postRecvFile()
         {
            if( duration_cast<duration<double>>(high_resolution_clock::now() - t_last_recv).count() > 1.0)
             {
-		        cout << "last_recv_id :" << recv_id << ", recv_num:" << recv_num << ", numOfBlocks:" << numsOfBlocks << ", expect_seq:" << expect_seq << endl;
+		        cout << "last_recv_id :" << recv_id << ", recv_num:" << recv_num << ", numOfBlocks:" << numOfBlocks << ", expect_seq:" << expect_seq << endl;
                 //cout << "ERROR: unfinished recv." << endl;
                 //return 0;
                 if(this->use_message)
@@ -412,47 +412,51 @@ int StreamControl::postRecvFile()
 		//cout  << *(int*)(buff) << endl;
 		        recv_id = *(uint32_t*)buff;
                 postRecvWr(wc[i].wr_id);
-                if(recv_id < expect_seq)
-                    continue;
-                if(recv_id == expect_seq)
+                if(use_message)
                 {
-                    if(expect_seq > recv_max_seq)
+                    if(recv_id < expect_seq)
+                        continue;
+                    if(recv_id == expect_seq)
                     {
-                        expect_seq ++;
-                        recv_max_seq = recv_id;
+                        if(expect_seq > recv_max_seq)
+                        {
+                            expect_seq ++;
+                            recv_max_seq = recv_id;
+                        }
+                        else
+                        {
+                            cout << "expect_seq:" << expect_seq << ", recv_max_seq:" << recv_max_seq << endl;
+                            assert(expect_seq != recv_max_seq);
+                            assert(!unrecv_packet_seqs.empty());
+                            assert(unrecv_packet_seqs[0].seq == recv_id);
+                            unrecv_packet_seqs[0].recved = true;
+                            while(!unrecv_packet_seqs.empty() && unrecv_packet_seqs[0].recved == true)
+                            {
+                                unrecv_packet_seqs.pop_front();
+                                expect_seq ++;
+                            }
+                        }
                     }
                     else
                     {
-                        cout << "expect_seq:" << expect_seq << ", recv_max_seq:" << recv_max_seq << endl;
-                        assert(expect_seq != recv_max_seq);
-                        assert(!unrecv_packet_seqs.empty());
-                        assert(unrecv_packet_seqs[0].seq == recv_id);
-                        unrecv_packet_seqs[0].recved = true;
-                        while(!unrecv_packet_seqs.empty() && unrecv_packet_seqs[0].recved == true)
+                        if(recv_id < recv_max_seq)
                         {
-                            unrecv_packet_seqs.pop_front();
-                            expect_seq ++;
+                            assert(!unrecv_packet_seqs.empty());
+                            if(unrecv_packet_seqs[recv_id -expect_seq].recved)
+                                continue;
+                            unrecv_packet_seqs[recv_id - expect_seq].recved = true;
                         }
-                    }
-                }
-                else
-                {
-                    if(recv_id < recv_max_seq)
-                    {
-                        assert(!unrecv_packet_seqs.empty());
-                        if(unrecv_packet_seqs[recv_id -expect_seq].recved)
-                            continue;
-                        unrecv_packet_seqs[recv_id - expect_seq].recved = true;
-                    }
-                    else if(recv_id > recv_max_seq)
-                    {
-                        //cout << "recv_id:" << recv_id << ", recv_max_seq:" << recv_max_seq << endl;
-                        for(uint32_t i = recv_max_seq + 1; i < recv_id; i++)
+                        else if(recv_id > recv_max_seq)
                         {
-                            unrecv_packet_seqs.emplace_back(i, false);
+                            //cout << "recv_id:" << recv_id << ", recv_max_seq:" << recv_max_seq << endl;
+                            for(uint32_t i = recv_max_seq + 1; i < recv_id; i++)
+                            {
+                                unrecv_packet_seqs.emplace_back(i, false);
+                            }
+                            unrecv_packet_seqs.emplace_back(recv_id, true);
+                            recv_max_seq = recv_id;
                         }
-                        unrecv_packet_seqs.emplace_back(recv_id, true);
-                        recv_max_seq = recv_id;
+                        else continue;
                     }
                 }
                 recv_num ++;
@@ -461,21 +465,21 @@ int StreamControl::postRecvFile()
                 // write(recv_fd, (const char*)buff, wc[i].byte_len);
             }
         }
-        //cout << "recv_max_seq:" << recv_max_seq << ", numOfBlocks:" << numsOfBlocks << endl;
+        //cout << "recv_max_seq:" << recv_max_seq << ", numOfBlocks:" << numOfBlocks << endl;
         //当最后几个包丢弃时，加判断
         if(use_message)
         {
-            if(first_restran && (recv_max_seq == numsOfBlocks - 1 || start_restran))
+            if(first_restran && (recv_max_seq == numOfBlocks - 1 || start_restran))
             {
-                uint32_t unrecv_num = numsOfBlocks - recv_num, loc = sizeof(uint32_t);
+                uint32_t unrecv_num = numOfBlocks - recv_num, loc = sizeof(uint32_t);
                 restran_size = (unrecv_num + 1) * sizeof(uint32_t);
                 restran_space = new char[restran_size];
                 memcpy(restran_space, &unrecv_num, sizeof(uint32_t));
                 if(recv_max_seq < numOfBlocks - 1)
                 {
-                    for(uint32_t i = recv_max_seq + 1; i < numOfBlock; i++)
+                    for(uint32_t i = recv_max_seq + 1; i < numOfBlocks; i++)
                     {
-                        unrecv_packet_seqs[i].emplace_back(i, false);
+                        unrecv_packet_seqs.emplace_back(i, false);
                     }
                 }
                 for(int i = 0; i < unrecv_packet_seqs.size(); i ++)
@@ -492,9 +496,9 @@ int StreamControl::postRecvFile()
                 t_last_recv = high_resolution_clock::now();
                 start_restran = true;
             }
-            else if(start_restran || expect_seq == numsOfBlocks)
+            else if(start_restran || expect_seq == numOfBlocks)
             {
-                uint32_t unrecv_num = numsOfBlocks - recv_num, loc = sizeof(uint32_t);
+                uint32_t unrecv_num = numOfBlocks - recv_num, loc = sizeof(uint32_t);
                 restran_size = (unrecv_num + 1) * sizeof(uint32_t);
                 memcpy(restran_space, &unrecv_num, sizeof(uint32_t));
                 for(int i = 0; i < unrecv_packet_seqs.size(); i ++)
@@ -538,7 +542,7 @@ int StreamControl::postRecvFile()
     delta = duration_cast<duration<double>>(t_last_recv - t).count();
     cout << "total recv_num: " << recv_num << endl;
     // cout << "I/O write rate: " << remote_file_info.file_size * 8/(delta_io * 1e9) << "Gbps" << endl;
-    cout << "recv rate: " << recv_bytes * 8/(delta * 1e9) << "Gbps" << endl;
+    cout << "recv rate: " << (double)remote_file_info.file_size * 8/(delta * 1e9) << "Gbps" << endl;
     cout << "finish receive file:" << remote_file_info.file_path << "(" << (double)remote_file_info.file_size/1e9 << "GB)" << endl;
     return 0;
 }
@@ -607,7 +611,7 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
     int remaining_recv_wqe = remote_qp_info.block_num;
     bool recv_finished = false, start_restran = false, first_restran = true;
     uint32_t restran_num = 0, restran_size = 0, restraned_num = 0;
-    uint32_t numsOfBlocks = file_size / this->block_size + ((file_size % this->block_size == 0) ? 0 : 1);
+    uint32_t numOfBlocks = file_size / this->block_size + ((file_size % this->block_size == 0) ? 0 : 1);
     char* restran_space = nullptr;
     auto t1 = high_resolution_clock::now();
     auto t2 = t1, t_io = t1;
@@ -861,7 +865,7 @@ void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
         auto t = high_resolution_clock::now();
         if(t >= timeout)
         {
-            rate_info.rate = ((*bytes - last_bytes) * 8.0 / (duration_cast<duration<double>>(t - timeout).count() + interval)) * 1e-6; // Gbps
+            rate_info.rate = ((*bytes - last_bytes) * 8.0 / (/*duration_cast<duration<double>>(t - timeout).count() +*/ interval)) * 1e-6; // Gbps
             rate_out << seq_num << ":" << rate_info.rate << " Mbps" << endl;
             cout << seq_num << ":" << rate_info.rate << " Mbps" << endl;
             rate_info.seq_num = ++seq_num;
@@ -872,7 +876,7 @@ void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
                 close(rate_sock);
                 return;
             }
-            timeout = t + duration_cast<nanoseconds>(duration<double>(interval)); // 10ms timeout
+            timeout += duration_cast<nanoseconds>(duration<double>(interval)); // 10ms timeout
             last_bytes = *bytes;
 	    //cout << "send_byte: " << *bytes << " bytes" << endl;
         }
