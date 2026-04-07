@@ -388,7 +388,7 @@ int StreamControl::postRecvFile()
         {
            if( duration_cast<duration<double>>(high_resolution_clock::now() - t_last_recv).count() > 1.0)
             {
-		        cout << "last_recv_id :" << recv_id << ", recv_num:" << recv_num << ", numOfBlocks:" << numOfBlocks << ", expect_seq:" << expect_seq << endl;
+		        // cout << "last_recv_id :" << recv_id << ", recv_num:" << recv_num << ", numOfBlocks:" << numOfBlocks << ", expect_seq:" << expect_seq << endl;
                 //cout << "ERROR: unfinished recv." << endl;
                 //return 0;
                 if(this->use_message)
@@ -425,7 +425,7 @@ int StreamControl::postRecvFile()
                         }
                         else
                         {
-                            cout << "expect_seq:" << expect_seq << ", recv_max_seq:" << recv_max_seq << endl;
+                            // cout << "expect_seq:" << expect_seq << ", recv_max_seq:" << recv_max_seq << endl;
                             assert(expect_seq != recv_max_seq);
                             assert(!unrecv_packet_seqs.empty());
                             assert(unrecv_packet_seqs[0].seq == recv_id);
@@ -619,7 +619,7 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
     double duration_time = 0, duration_io = 0;
     this->rateController->runSend();
     cout << "use_message: " << this->use_message << endl;
-    std::thread statistic_thread(statistic, &ack_bytes, bytes_left, rate_sock);
+    std::thread statistic_thread(&StreamControl::statistic, this, &ack_bytes, bytes_left, rate_sock);
     while (1)
     { 
         // cout << "try to recv restran" << endl;
@@ -842,7 +842,7 @@ int recvData(HwRdma *hwrdma, int peer_fd,  LocalConf* local_conf, ClientList* cl
     return 0;
 }
 
-void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
+void StreamControl::statistic(uint64_t* bytes, uint64_t total, int rate_sock)
 {
     std::ofstream rate_out("rate.log");
     int seq_num = 0;
@@ -866,7 +866,7 @@ void statistic(uint64_t* bytes, uint64_t total, int rate_sock)
         if(t >= timeout)
         {
             rate_info.rate = ((*bytes - last_bytes) * 8.0 / (/*duration_cast<duration<double>>(t - timeout).count() +*/ interval)) * 1e-6; // Gbps
-            rate_out << seq_num << ":" << rate_info.rate << " Mbps" << endl;
+            rate_out << seq_num << ":" << rate_info.rate << " Mbps " << this->rateController->getRate() <<  endl;
             cout << seq_num << ":" << rate_info.rate << " Mbps" << endl;
             rate_info.seq_num = ++seq_num;
             int ret = send(rate_sock, (char*)&rate_info, sizeof(rate_info), MSG_NOSIGNAL);

@@ -9,7 +9,9 @@
 #include <netinet/if_ether.h>
 #include <arpa/inet.h>
 #include <sys/ioctl.h>
+#include <linux/if_ether.h>
 #include <linux/if_packet.h>
+#include <net/ethernet.h>
 #include <net/if.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -26,6 +28,7 @@
 #include <mutex>
 #include <queue>
 #include <condition_variable>
+#include <signal.h>
 
 using std::chrono::duration;
 using std::chrono::duration_cast;
@@ -43,7 +46,6 @@ const int MAX_WIRE_NUM = 4;
 // 描述接收数据包时的以太网链路层的对端信息，实际上值为交换机连接本机的出端口信息
 struct sockaddr_ll from;
 socklen_t fromlen = sizeof(sockaddr_ll);
-
 struct SwitchCache
 {
     string port_name;
@@ -68,8 +70,8 @@ struct SwitchCache
             g_l = line_rate; // - my_cache.u_l / 5;
         else
             g_l = (line_rate * SEND_TIMES - u_l) / n_l;
-        // cout <<"iter:"<< n_iter + 1 <<"\tn:" << n_l << "\tu:" << u_l << "\ty:" << y_l
-        //  << "\tg_l:"<<g_l<<"\to_l:"<<o_l<<endl;
+       // cout <<"iter:"<< n_iter + 1 <<"\tn:" << n_l << "\tu:" << u_l << "\ty:" << y_l
+       //  << "\tg_l:"<<g_l<<"\to_l:"<<o_l<<endl;
         if (g_l < 0)
             g_l = 0;
         n_l = 0;
@@ -81,8 +83,51 @@ struct SwitchCache
 std::unordered_map<uint32_t, SwitchCache *> dst_port_cache;
 std::unordered_map<string, SwitchCache *> port_name_cache;
 SwitchCache *switch_cache[MAX_WIRE_NUM];
+
+void switch_promisc(int sockfd, bool enable, const char* iface = "enp2s0")
+{
+    struct ifreq ifr;
+    strncpy(ifr.ifr_name, iface, IFNAMSIZ);
+    if (ioctl(sockfd, SIOCGIFFLAGS, &ifr) < 0) {
+        perror("ioctl (SIOCGIFFLAGS)");
+        close(sockfd);
+        return;
+    }
+    if(enable)
+        ifr.ifr_flags |= IFF_PROMISC;
+    else
+        ifr.ifr_flags &= ~IFF_PROMISC;
+    if (ioctl(sockfd, SIOCSIFFLAGS, &ifr) < 0) {
+        perror("ioctl (SIOCSIFFLAGS)");
+        close(sockfd);
+        return;
+    }
+}
+
 bool stop_event = false; // 嗅探循环停止信号，暂时无用
 
+void stop_handler(int sig)
+{
+    stop_event = true;
+}
+
+unsigned char if_mac[6] = {0xb0,0x51,0x8e,0xf6,0x36,0x13};
+int parse_mac_str(const char *mac_str)
+{
+    char *endptr;
+    int i = 0;
+    for (; i < 6; i++) {
+        // 跳过非十六进制字符（如分隔符）
+        while (*mac_str && !isxdigit(*mac_str)) mac_str++;
+        if (!*mac_str) return -1; // 提前结束
+        
+        if_mac[i] = (uint8_t)strtol(mac_str, &endptr, 16);
+        mac_str = endptr; // 移动到下一部分
+    }
+    printf("local MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+           	if_mac[0], if_mac[1], if_mac[2], if_mac[3], if_mac[4], if_mac[5]);
+    return 0;
+}
 // 解析交换机路由配置文件
 // config_path: 配置文件路径
 // port_name_cache: 端口名到SwitchCache*的映射
@@ -94,12 +139,16 @@ void parse_switch_config(const std::string& config_path) {
         return;
     }
     std::string line;
-    enum Section { NONE, PORT, ROUTE } section = NONE;
+    enum Section { NONE, MAC, PORT, ROUTE } section = NONE;
     while (std::getline(fin, line)) {
         // 去除首尾空白
         line.erase(0, line.find_first_not_of(" \t\r\n"));
         line.erase(line.find_last_not_of(" \t\r\n") + 1);
         if (line.empty() || line[0] == '#') continue;
+        if(line == "[Mac]") {
+            section = MAC;
+            continue;
+        }
         if (line == "[Port]") {
             section = PORT;
             continue;
@@ -109,7 +158,15 @@ void parse_switch_config(const std::string& config_path) {
             continue;
         }
         std::istringstream iss(line);
-        if (section == PORT) {
+        if (section == MAC) {
+            int ret = parse_mac_str(line.c_str());
+            if(ret < 0)
+            {
+                cout << "wrong mac address\n" << endl;
+                exit(-1);
+            }
+        } 
+        else if (section == PORT) {
             std::string port_name;
             double line_rate;
             if (!(iss >> port_name >> line_rate)) continue;
@@ -163,9 +220,9 @@ unsigned short in_cksum(unsigned short *addr, int len)
     return answer;
 }
 
-const int DELAY_BUF_SIZE = 40960;
+const int DELAY_BUF_SIZE = 4096;
 const unsigned int MTU = 2048;
-const double DELAY_MS = 3.0; // 延迟发送的时间间隔
+const int DELAY_MS = 1; // 延迟发送的时间间隔
 
 struct DelayedPacket {
     char data[MTU];
@@ -174,9 +231,9 @@ struct DelayedPacket {
     bool valid = false;
 };
 
-DelayedPacket delay_buf[DELAY_BUF_SIZE];
-int head = 0;
-int tail = 0;
+DelayedPacket delay_buf[(DELAY_BUF_SIZE * DELAY_MS)];
+int _head = 0;
+int _tail = 0;
 std::mutex buf_mutex;
 std::condition_variable buf_cv;
 
@@ -185,24 +242,39 @@ void delay_sender_thread(int sockfd) {
     CPU_ZERO(&cpuset);
     CPU_SET(2, &cpuset); // 绑定到CPU核心2
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    const char *iface = "enp2s0";
+    struct sockaddr_ll addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sll_family = AF_PACKET;
+    addr.sll_protocol = htons(ETH_P_IP);
+    addr.sll_ifindex = if_nametoindex(iface);
+    if (addr.sll_ifindex == 0) { 
+        perror("if_nametoindex"); 
+        return; 
+    }
+
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind"); close(sockfd); return ;
+    }
     while (!stop_event) {
         std::unique_lock<std::mutex> lock(buf_mutex);
-        while (tail != head) {
-            DelayedPacket &pkt = delay_buf[tail];
+        while (_tail != _head) {
+            DelayedPacket &pkt = delay_buf[_tail];
             if (pkt.valid && std::chrono::high_resolution_clock::now() >= pkt.send_time) { 
                 sendto(sockfd, pkt.data, pkt.size, 0, (struct sockaddr *)&from, fromlen);
                 pkt.valid = false;
-                tail = (tail + 1) % DELAY_BUF_SIZE;
+                _tail = (_tail + 1) % DELAY_BUF_SIZE;
             } else {
                 break;
             }
         }
-        buf_cv.wait_for(lock, std::chrono::milliseconds((int)DELAY_MS), [&] {
-            return stop_event || (tail != head && delay_buf[tail].valid && 
-                   std::chrono::high_resolution_clock::now() >= delay_buf[tail].send_time);
+        buf_cv.wait_for(lock, std::chrono::nanoseconds(int(DELAY_MS * 1000000)), [&] {
+            return stop_event || (_tail != _head && delay_buf[_tail].valid && 
+                   std::chrono::high_resolution_clock::now() >= delay_buf[_tail].send_time);
         });
     }
 }
+
 
 void sniff_lucp()
 {
@@ -210,15 +282,36 @@ void sniff_lucp()
     CPU_ZERO(&cpuset);
     CPU_SET(3, &cpuset); // 绑定到CPU核心3
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
-    int sockfd = socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP));
+    int sockfd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP));
     if (sockfd < 0) {
         std::cerr << "Error creating raw socket for sniffing ICMP" << std::endl;
         return;
     }
+    const char *iface = "enp2s0";
+    struct sockaddr_ll addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sll_family = AF_PACKET;
+    addr.sll_protocol = htons(ETH_P_IP);
+    addr.sll_ifindex = if_nametoindex(iface);
+    if (addr.sll_ifindex == 0) { 
+        perror("if_nametoindex"); 
+        return; 
+    }
+
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind"); close(sockfd); return ;
+    }
+    switch_promisc(sockfd, true, iface);
+
     auto delay_ms = std::chrono::nanoseconds(int(DELAY_MS * 1000000)); // 转换为纳秒
     while (!stop_event)
     {
         // 直接在环形缓冲区接收数据
+        int head = 0;
+        {
+            std::unique_lock<std::mutex> lock(buf_mutex);
+            head = _head;
+        }
         delay_buf[head].size = recvfrom(sockfd, delay_buf[head].data, MTU, MSG_DONTWAIT, (struct sockaddr *)&from, &fromlen);
         if (delay_buf[head].size < 0 && errno == EWOULDBLOCK)
             continue;
@@ -227,17 +320,39 @@ void sniff_lucp()
             break;
         }
         auto now_time = std::chrono::high_resolution_clock::now();
-        struct iphdr *ip_header = (struct iphdr *)delay_buf[head].data;
+	    struct ethhdr *eth = (struct ethhdr*)delay_buf[head].data;
+        struct iphdr *ip_header = (struct iphdr*)(delay_buf[head].data + sizeof(struct ethhdr));
         auto it = dst_port_cache.find(ip_header->daddr);
-        // cout << "dst_ip :"  << inet_ntoa(*((struct in_addr*)&(ip_header->daddr))) << endl;
         if (it == dst_port_cache.end())
             continue;
+        /*printf("\n[帧长度: %ld]MAC: %02X:%02X:%02X:%02X:%02X:%02X → %02X:%02X:%02X:%02X:%02X:%02X\n", 
+            delay_buf[head].size,
+            eth->h_source[0], eth->h_source[1], eth->h_source[2],
+            eth->h_source[3], eth->h_source[4], eth->h_source[5],
+            eth->h_dest[0], eth->h_dest[1], eth->h_dest[2],
+            eth->h_dest[3], eth->h_dest[4], eth->h_dest[5]);
+        char src_addr[16], dst_addr[16];
+        strcpy(src_addr, inet_ntoa(*(struct in_addr*)&ip_header->saddr));
+        strcpy(dst_addr, inet_ntoa(*(struct in_addr*)&ip_header->daddr));
+        printf("IP 长度: %d | IP: %s → %s | %s\n",
+            ntohs(ip_header->tot_len),
+            src_addr,dst_addr,
+	    ip_header->protocol == IPPROTO_ICMP ? "ICMP" :
+            ip_header->protocol == IPPROTO_UDP ? "UDP" : "其他");*/
+
+        //src_mac <- local mac
+         memcpy(eth->h_source, if_mac, 6);
+        // dst_mac <- vlan mac
+        memcpy(from.sll_addr, eth->h_dest, 6);
         if (ip_header->protocol == IPPROTO_ICMP) {
-            struct LucpPacket *lucp_packet = (struct LucpPacket *)(delay_buf[head].data + sizeof(struct iphdr));
-            if (lucp_packet->hdr.type == ICMP_INFO_REQUEST) {
-                lucp_packet->payload.r_c += 1; // 指示当前路由器
+            struct LucpPacket *lucp_packet = (struct LucpPacket *)((char*)ip_header + sizeof(struct iphdr));
+            if (lucp_packet->hdr.type == ICMP_INFO_REQUEST || lucp_packet->hdr.type == ICMP_INFO_REPLY) {
+		        // lucp_packet->hdr.type = ICMP_INFO_REPLY;
+                
                 // 包中过载率和公平速率是否更新的判定
+                if(lucp_packet->hdr.type == ICMP_INFO_REQUEST)
                 {
+                    lucp_packet->payload.r_c += 1; // 指示当前路由器
                     std::lock_guard<std::mutex> lock(it->second->cache_mutex);
                     // 如果当前路由器的过载率大于包中的过载率，
                     // 或者当前路由器的公平速率小于包中的公平速率
@@ -256,40 +371,41 @@ void sniff_lucp()
                         it->second->u_l += lucp_packet->payload.x_r;
                     it->second->y_l += lucp_packet->payload.x_r;      // 总流量增加
                     lucp_packet->payload.n_iter = it->second->n_iter; // 将当前迭代次数写入
+                    lucp_packet->hdr.checksum = 0;
+                    lucp_packet->hdr.checksum = in_cksum((unsigned short *)lucp_packet, sizeof(LucpPacket));
+                    sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
                 }
-                // 计算校验和
-                lucp_packet->hdr.checksum = 0;
-                lucp_packet->hdr.checksum = in_cksum((unsigned short *)lucp_packet, sizeof(LucpPacket));
-                // 原路径转发回网络中
-                // delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
-                delay_buf[head].valid = true;
-                head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
-
-                // sendto(sockfd, ip_header, sizeof(iphdr) + sizeof(LucpPacket), 0, (struct sockaddr *)&from, fromlen);
-#ifdef DEBUG
-                if (ntohs(lucp_packet->hdr.un.echo.sequence) == 0) // for debug，报告新流到来
-                    cout << "new flow id " << lucp_packet->hdr.un.echo.id << "arrives." << endl;
-#endif
+                else {
+                    std::unique_lock<std::mutex> lock(buf_mutex);
+                    delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
+                    delay_buf[head].valid = true;
+                    _head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
+                }
             }
-            else
-            {
+            else if(lucp_packet->hdr.type == ICMP_ECHOREPLY){
+                std::unique_lock<std::mutex> lock(buf_mutex);
                 delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
                 delay_buf[head].valid = true;
-                head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
-                // sendto(sockfd, delay_buf[head].data, delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
+                _head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
             }
-        }
-        else if (ip_header->protocol == IPPROTO_UDP)
+            else {
+                sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
+            }
+            // delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
+            // sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
+        }else if (ip_header->protocol == IPPROTO_UDP)
         {
             // 缓存延迟发送
             // cout << "UDP packet received, size: " << delay_buf[head].size << endl;
+            std::unique_lock<std::mutex> lock(buf_mutex);
             delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
             delay_buf[head].valid = true;
-            head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
+            _head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
             // sendto(sockfd, delay_buf[head].data, delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
         }
     }
     stop_event = true;
+    switch_promisc(sockfd, false, iface);
     close(sockfd);
 }
 
@@ -321,10 +437,12 @@ int main(int argc, char *argv[])
         std::cerr << "Usage: " << argv[0] << " <switch_config_file>" << std::endl;
         return 1;
     }
+    signal(SIGINT, stop_handler);
+	signal(SIGTERM, stop_handler);
     parse_switch_config(argv[1]);
     std::thread sniff_thread(sniff_lucp);
     std::thread collect_thread(collect_thread_func);
-    std::thread delay_thread(delay_sender_thread, socket(AF_PACKET, SOCK_DGRAM, htons(ETH_P_IP)));
+    std::thread delay_thread(delay_sender_thread, socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP)));
     sniff_thread.join();
     delay_thread.join();
     collect_thread.join();

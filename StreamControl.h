@@ -66,6 +66,7 @@ public:
     StreamControl(HwRdma *hwrdma, int peer_fd, LocalConf *local_conf, uint32_t peer_addr, bool server_mode, bool use_message = true);
 
     ~StreamControl();
+    void statistic(uint64_t* bytes, uint64_t total, int rate_sock);
     int bindMemoryRegion();
     int createBufferPool();
     int createLucpContext();

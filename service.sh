@@ -9,9 +9,11 @@ if [ "$1" != "start" ] && [ "$1" != "stop" ]; then
 fi
 if [ "$1" == "start" ]; then
 	sshpass -p "123456" ssh sw2@10.2.152.201 "cd /home/sw2/fileTransferCmd; sudo ./switch switch2.conf > /dev/null 2>&1 &"
+	sshpass -p "123456" ssh sw1@10.2.229.101 "cd /home/sw1/fileTransferCmd; sudo ./switch switch1.conf > /dev/null 2>&1 &"
 	echo "switch service start."
 elif [ "$1" == "stop" ]; then
 	sshpass -p "123456" ssh sw2@10.2.152.201 "sudo killall -e switch"
+	sshpass -p "123456" ssh sw1@10.2.229.101 "sudo killall -e switch"
 	echo "switch service stop."
 fi
 # ip_list=(192.168.11.2 192.168.12.2 192.168.13.2 192.168.21.2 192.168.22.2 192.168.23.2)

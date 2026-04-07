@@ -8,5 +8,6 @@ if [ "$#" -ne 1 ]; then
 fi
 for i in ${!ip_list[@]}; do
     sshpass -p "123456" scp $1 ${user_list[$i]}@${ip_list[$i]}:/home/${user_list[$i]}/fileTransferCmd/
+    #sshpass -p "123456" ssh ${user_list[$i]}@${ip_list[$i]} "cd /home/${user_list[$i]}/fileTransferCmd;make clean; make server; make client"
     echo "File $1 transferred to ${user_list[$i]}@${ip_list[$i]}"
 done

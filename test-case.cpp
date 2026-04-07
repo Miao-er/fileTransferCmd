@@ -14,38 +14,15 @@
 #include <algorithm>
 #include <condition_variable>
 #include <atomic>
-#include <librdkafka/rdkafkacpp.h>
 #include <nlohmann/json.hpp>  // 添加json库头文件
 using json = nlohmann::json;
-#define MAX_RATE 50000.0
-#define DEBUG
-// #define READ_FROM_FILE
-
-#define LOG_ERR_FILE
-
-// #ifndef READ_FROM_FILE
-#define LOG_RATE_FILE
-// #endif
-
-#ifdef LOG_ERR_FILE
-    std::ofstream err_log("error.log");
-    #define ERR_LOG(x) err_log << x << std::endl
-#else
-    #define ERR_LOG(x) std::cerr << x << std::endl
-#endif
-
-#ifdef LOG_RATE_FILE
-    std::ofstream rate_log("rate.log");
-    #define RATE_LOG(x) rate_log << x << std::endl
-    #define RESET_LOG() {rate_log.close(); rate_log.open("rate.log", std::ios::trunc);}
-#else
-    #define RATE_LOG(x)
-    #define RESET_LOG()
-#endif
-
+#define MAX_RATE 9000.0
+#define COLLECT_INTERVAL 0.01  //s
+std::string config_file_path;
+std::string rate_save_path;
 void caculator_factor(double& fairness, double& stability) 
 {
-    std::ifstream read_rate("rate.log");
+    std::ifstream read_rate("test-rate.log");
     std::string line;
     std::vector<std::string> list_name = {"task_1_rate", "task_2_rate", "task_3_rate"};
     std::vector<double> list_rate;
@@ -130,57 +107,7 @@ void caculator_factor(double& fairness, double& stability)
     read_rate.close();
 }
 
-class KafkaProducer {
-public:
-    KafkaProducer(const std::string& brokers) {
-#ifndef DEBUG
-        RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
-        std::string errstr;
-        conf->set("bootstrap.servers", brokers, errstr);
 
-        _producer = RdKafka::Producer::create(conf, errstr);
-        if (!_producer) {
-            ERR_LOG("Failed to create producer: " << errstr);
-            exit(1);
-        }
-        std::cout << "Created producer " << _producer->name() << std::endl;
-        delete conf;
-#endif
-    }
-    void set_topic(const std::string& topic_name) {
-        topic = topic_name;
-    }
-
-    void send(const json& message) {
-        std::string payload = message.dump();
-#ifndef DEBUG
-        RdKafka::ErrorCode resp = _producer->produce(
-            topic,
-            RdKafka::Topic::PARTITION_UA,
-            RdKafka::Producer::RK_MSG_COPY,
-            const_cast<char*>(payload.c_str()),
-            payload.size(),
-            nullptr, 0,
-            0, nullptr
-        );
-        if (resp != RdKafka::ERR_NO_ERROR) {
-            ERR_LOG("Produce failed: " << RdKafka::err2str(resp));
-        }
-        _producer->poll(0); // 处理回调
-#endif
-        RATE_LOG(payload);
-    }
-    ~KafkaProducer() {
-#ifndef DEBUG
-        _producer->flush(1000);
-        delete _producer;
-#endif
-    }
-
-private:
-    RdKafka::Producer* _producer;
-    std::string topic;
-};
 
 class KafkaConsumer;
 struct RateInfo
@@ -232,8 +159,10 @@ struct cmd_info
     char local_ip[IP_ADDR_LEN];
     char server_ip[IP_ADDR_LEN];
     uint64_t file_size; // in bytes
+    // double time; // in seconds
     double delay; // in seconds
 };
+
 void parse_size(const char* size_str, uint64_t* size) {
     if (size_str == nullptr || size == nullptr)
     {
@@ -255,6 +184,19 @@ void parse_size(const char* size_str, uint64_t* size) {
         *size = std::stoull(str); // bytes
     }
 }
+void parse_time(const char* time_str, double* time) {
+    if (time_str == nullptr || time == nullptr)
+    {
+        *time = -1; // Invalid time
+        return;
+    }
+    std::string str(time_str);
+    if (str.back() == 's' || str.back() == 'S') {
+        str.pop_back();
+        *time = std::stod(str); // seconds
+    }
+    else *time = -1; // Invalid time
+}
 
 void parse_delay(const char* delay_str, double* delay) {
     if (delay_str == nullptr || delay == nullptr)
@@ -271,9 +213,13 @@ void parse_delay(const char* delay_str, double* delay) {
 }
 
 int parse_master_config(const std::string& config_path, std::vector<ClientInfo>& clients) {
-    std::ifstream fin(config_path);
+    if(config_path.empty()) {
+        std::cerr << "Config file path is empty!" << std::endl;
+        return -1;
+    }
+    std::ifstream fin(config_file_path);
     if (!fin.is_open()) {
-        std::cerr << "Failed to open config file: " << config_path << std::endl;
+        std::cerr << "Failed to open config file: " << config_file_path << std::endl;
         return -1;
     }
     std::string line;
@@ -284,6 +230,7 @@ int parse_master_config(const std::string& config_path, std::vector<ClientInfo>&
         if (line.empty() || line[0] == '#') continue;
         std::istringstream iss(line);
         ClientInfo client = {};
+        client.file_size = (uint64_t)-1;
         char file_size_str[16], delay_str[16];
         if (!(iss >> client.socket_ip >> client.local_ip >> client.server_ip >> client.port >> file_size_str >> delay_str)) {
             std::cerr << "Invalid line in config: " << line << std::endl;
@@ -291,12 +238,13 @@ int parse_master_config(const std::string& config_path, std::vector<ClientInfo>&
         }
         parse_size(file_size_str, &client.file_size);
         parse_delay(delay_str, &client.delay);
-        if (client.file_size == (uint64_t) -1) {
-            std::cerr << "Invalid file size in config: " << file_size_str << std::endl;
+
+        if(client.file_size == (uint64_t)-1) {
+            std::cerr << "Invalid file size: " << file_size_str << std::endl;
             return -1;
         }
         if (client.delay < 0) {
-            std::cerr << "Invalid delay in config: " << delay_str << std::endl;
+            std::cerr << "Invalid delay: " << delay_str << std::endl;
             return -1;
         }
         clients.push_back(client);
@@ -307,7 +255,13 @@ int parse_master_config(const std::string& config_path, std::vector<ClientInfo>&
 
 
 // 检查线程
-void check_and_send_thread(RateCollector* collector, KafkaProducer& producer) {
+void check_and_send_thread(RateCollector* collector) {
+    if(rate_save_path.empty())
+    {
+        std::cout << "Rate save path is empty!" << std::endl;
+        exit(-1);
+    }
+    std::ofstream rate_log(rate_save_path);
     while (collector->finished.load() == false || !collector->rate_queue.empty()) {
         std::unique_lock<std::mutex> lock(collector->queue_mutex);
         collector->queue_cv.wait(lock, [&collector]{
@@ -320,7 +274,7 @@ void check_and_send_thread(RateCollector* collector, KafkaProducer& producer) {
         json j_obj;
         float total_rate = 0.0;
         for (size_t i = 0; i < elem.rates.size(); ++i) {
-            std::string key = "task_" + std::to_string(i + 1) + "_rate";
+            std::string key = std::string(clients[i].socket_ip) + "_rate";
             if (elem.rates[i].rate < -1.5) {
                 j_obj[key] = nullptr;
             } else if(elem.rates[i].rate < -0.5) {
@@ -331,34 +285,36 @@ void check_and_send_thread(RateCollector* collector, KafkaProducer& producer) {
                 total_rate += elem.rates[i].rate / 1000.0;
             }
         }
-        j_obj["total_rate"] = total_rate > MAX_RATE/1000.0 ? MAX_RATE/1000.0 : total_rate; // 限制总速率
-        j_obj["timepoint"] = (double)elem.seq_num / 100.0;
-        if(collector->finished_count.load() == collector->client_num && collector->rate_queue.size() == 1)
-        {
-            double fairness = 0, stability = 0;
-            caculator_factor(fairness,stability);
-            j_obj["fairness"] = fairness;
-            j_obj["stability"] = stability;
-        }
-        else
-        {
-            j_obj["fairness"] = nullptr;
-            j_obj["stability"] = nullptr;
-        }
+        //Gbps
+        j_obj["total_rate"] = total_rate ; // > MAX_RATE/1000.0 ? MAX_RATE/1000.0 : total_rate; // 限制总速率
+        j_obj["timepoint"] = (double)elem.seq_num * COLLECT_INTERVAL;
+        // if(collector->finished_count.load() == collector->client_num && collector->rate_queue.size() == 1) //last_one
+        // {
+        //     double fairness = 0, stability = 0;
+        //     caculator_factor(fairness,stability);
+        //     j_obj["fairness"] = fairness;
+        //     j_obj["stability"] = stability;
+        // }
+        // else
+        // {
+        //     j_obj["fairness"] = nullptr;
+        //     j_obj["stability"] = nullptr;
+        // }
 
         collector->rate_queue.pop_front();
         lock.unlock();
-        producer.send(j_obj);
+        rate_log << j_obj.dump() << std::endl;
     }
+    rate_log.close();
 }
 
-int collect_rate_info(RateCollector* collector, int rate_sock, int idx) {
+int collect_rate_info(RateCollector* collector, int rate_sock, int idx, double delay) {
     RateInfo info;
     while (true) {
         int ret = recv(rate_sock, (char*)&info, sizeof(RateInfo), 0);
         if (ret <= 0) break;
         std::unique_lock<std::mutex> lock(collector->queue_mutex);
-        int true_seq_num = info.seq_num + idx * 100; // 假设每个客户端的seq_num是连续的
+        int true_seq_num = info.seq_num + ceil(delay / COLLECT_INTERVAL); // 假设每个客户端的seq_num是连续的
         // 检查是否需要创建新的RateQueueElem
         while (collector->rate_queue.empty() || collector->wait_seq_num <= true_seq_num) {
             collector->rate_queue.emplace_back(collector->client_num, collector->wait_seq_num);
@@ -371,10 +327,8 @@ int collect_rate_info(RateCollector* collector, int rate_sock, int idx) {
         // 检查是否全部填充
         bool all_ready = true;
         for (size_t i = 0; i < collector->client_num; ++i) {
-            if(i == idx) continue;
-            if(collector->rate_queue[true_seq_num - front_seq_num].seq_num < i * 100)
-                break;
             if(collector->finished_arr[i]) continue;
+            //填充的是默认值
             if (collector->rate_queue[true_seq_num - front_seq_num].rates[i].seq_num == 0 && collector->rate_queue[true_seq_num - front_seq_num].rates[i].rate < 0) {
                 all_ready = false;
                 break;
@@ -384,7 +338,7 @@ int collect_rate_info(RateCollector* collector, int rate_sock, int idx) {
             collector->rate_queue[true_seq_num - front_seq_num].ready = true;
             collector->queue_cv.notify_one();
         }
-        if(true_seq_num > idx * 100 + 5 && info.rate < 0)
+        if(info.seq_num > 0 && info.rate < 0)
         {
             collector->finished_count++;
             collector->finished_arr[idx] = true;
@@ -430,6 +384,7 @@ void send_start_cmd(RateCollector* collector, const ClientInfo& client, const st
     strncpy(cmd_info.local_ip, client.local_ip, IP_ADDR_LEN);
     strncpy(cmd_info.server_ip, client.server_ip, IP_ADDR_LEN);
     cmd_info.file_size = client.file_size;
+    // cmd_info.time = client.time;
     cmd_info.delay = client.delay;
 
     send(sockfd, (char*)&cmd_info, sizeof(cmd_info), 0);
@@ -443,7 +398,7 @@ void send_start_cmd(RateCollector* collector, const ClientInfo& client, const st
     }
     else
         std::cout << "Sent END command to " << client.local_ip << std::endl;
-    collect_rate_info(collector, sockfd, idx);
+    collect_rate_info(collector, sockfd, idx, cmd_info.delay);
     close(sockfd);
 }
 
@@ -474,158 +429,69 @@ class KafkaConsumer {
 public:
     KafkaConsumer(const std::string& brokers, const std::string& group_id) {
         // 配置消费者属性
-#ifndef DEBUG
-        RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
-        std::string errstr;
-        conf->set("bootstrap.servers", brokers, errstr);
-        conf->set("group.id", group_id, errstr);
-        conf->set("auto.offset.reset", "earliest", errstr);  // 从最早的消息开始消费
-
-        // 创建消费者实例
-        _consumer = RdKafka::KafkaConsumer::create(conf, errstr);
-        if (!_consumer) {
-            ERR_LOG("Failed to create consumer: " << errstr);
-            exit(1);
-        }
-        std::cout << "Created consumer " << _consumer->name() << std::endl;
-#endif
     }
 
     void subscribe(const std::vector<std::string>& topics) {
-#ifndef DEBUG
-        RdKafka::ErrorCode err = _consumer->subscribe(topics);
-        if (err != RdKafka::ERR_NO_ERROR) {
-            ERR_LOG("Failed to subscribe to topics: " << RdKafka::err2str(err));
-        } else {
-            std::cout << "Subscribed to topics." << std::endl;
-        }
-#endif
     }
-#ifndef DEBUG
-    void consume(KafkaProducer& producer) {
-        while (true) {
-            RdKafka::Message* msg = _consumer->consume(1000);  // 超时时间 1000ms
-            switch (msg->err()) {
-                case RdKafka::ERR_NO_ERROR: {
-                    std::string payload(static_cast<const char*>(msg->payload()), msg->len());
-                    if (!payload.empty() && payload.front() == '"' && payload.back() == '"') {
-                        payload = payload.substr(1, payload.size() - 2);
-                    }
-                    // 去除所有转义反斜杠
-                    payload.erase(std::remove(payload.begin(), payload.end(), '\\'), payload.end());
-#else
-    void consume(KafkaProducer& producer, std::string cmd) {
-                    std::string payload = std::string("{\"DCQCN_ENABLE\": ") + (cmd == "UP" ? "false" : "true") + ", \"START_TRANSFER\": true}"; // 模拟接收到的消息
-#endif
-                    std::cout << "Received message: " << payload << std::endl;
-                    try {
-                        auto j = json::parse(payload);
-                        bool dcqcn_enable = j.value("DCQCN_ENABLE", false);
-                        bool start_transfer = j.value("START_TRANSFER", false);
-                        std::cout << "DCQCN_ENABLE: " << std::boolalpha << dcqcn_enable
-                                  << ", START_TRANSFER: " << std::boolalpha << start_transfer << std::endl;
-#ifdef READ_FROM_FILE
-                        if(!start_transfer) return;
-                        std::string json_file_path;
-                        if(dcqcn_enable)
-                            json_file_path =  "rate_DCQCN.log";
-                        else
-                            json_file_path = "rate_LUCP.log";
-                        std::ifstream json_file(json_file_path);
-                        if (!json_file) {
-                            std::cerr << "Failed to open JSON file: " << json_file_path << std::endl;
-                            return;
-                        }
-                        std::string line;
-                        std::vector<std::string> list_name = {"task_1_rate", "task_2_rate", "task_3_rate", "total_rate"};
-                        while (std::getline(json_file, line)) {
-                            // 处理每一行
-                            if(line.empty()) continue;
-                            auto rate_j = json::parse(line);
-                            producer.send(rate_j);
-                            usleep(10000);  // 休眠 10ms
-                        }
-			std::cout << "finish send rate." << std::endl;
-#else
-                        int status;
-                        if (dcqcn_enable) {
-                            status = processCMD("bash ~/fileTransferCmd/dcqcn.sh enable");
-                            //system("bash ~/fileTransferCmd/dcqcn.sh enable");
-                        } else {
-                            status = processCMD("bash ~/fileTransferCmd/dcqcn.sh disable");
-                            //system("bash ~/fileTransferCmd/dcqcn.sh disable");
-                        }
-                        if(status != 0) {
-                            std::cerr << "Failed to execute command." << std::endl;
-                            return;
-                        }
-                        if(start_transfer)
-                        {
-                            RESET_LOG();
-                            RateCollector collector;
-                            collector.finished = false;
-                            collector.finished_count = 0;
-                            collector.client_num = clients.size();
-                            collector.finished_arr.resize(collector.client_num, false);
-                            collector.rate_queue.clear();
-                            collector.wait_seq_num = 0;
-                            std::thread checker(check_and_send_thread, &collector, std::ref(producer));
-                            std::vector<std::thread> threads;
-                            int idx = 0;
-                            for (const auto& client : clients) {
-                                threads.emplace_back(send_start_cmd, &collector, client, dcqcn_enable ? "DOWN" : "UP", idx++);
-                            }
-                            for (auto& t : threads) t.join();
-                            checker.join();
-                        }
-#endif
-                    } catch (const std::exception& e) {
-                        ERR_LOG("JSON parse error: " << e.what());
-                    }
-#ifndef DEBUG
-                    break;
-                }
-                case RdKafka::ERR__TIMED_OUT:
-                    break;
-                default:
-                    ERR_LOG("Error: " << msg->errstr());
-            }
-            delete msg;
+    void consume(std::string cmd) {
+        std::string payload = std::string("{\"DCQCN_ENABLE\": ") + (cmd == "UP" ? "false" : "true") + ", \"START_TRANSFER\": true}"; // 模拟接收到的消息
+        std::cout << "Received message: " << payload << std::endl;
+        auto j = json::parse(payload);
+        bool dcqcn_enable = j.value("DCQCN_ENABLE", false);
+        bool start_transfer = j.value("START_TRANSFER", false);
+        std::cout << "DCQCN_ENABLE: " << std::boolalpha << dcqcn_enable
+                    << ", START_TRANSFER: " << std::boolalpha << start_transfer << std::endl;
+
+        int status;
+        if (dcqcn_enable) {
+            status = processCMD("bash ~/fileTransferCmd/dcqcn.sh enable");
+            //system("bash ~/fileTransferCmd/dcqcn.sh enable");
+        } else {
+            status = processCMD("bash ~/fileTransferCmd/dcqcn.sh disable");
+            //system("bash ~/fileTransferCmd/dcqcn.sh disable");
         }
-#endif
+        if(status != 0) {
+            std::cerr << "Failed to execute command." << std::endl;
+            return;
+        }
+        if(start_transfer)
+        {
+            RateCollector collector;
+            collector.finished = false;
+            collector.finished_count = 0;
+            collector.client_num = clients.size();
+            collector.finished_arr.resize(collector.client_num, false);
+            collector.rate_queue.clear();
+            collector.wait_seq_num = 0;
+            std::thread checker(check_and_send_thread, &collector);
+            std::vector<std::thread> threads;
+            int idx = 0;
+            for (const auto& client : clients) {
+                threads.emplace_back(send_start_cmd, &collector, client, dcqcn_enable ? "DOWN" : "UP", idx++);
+            }
+            for (auto& t : threads) t.join();
+            checker.join();
+        }
     }
 
     ~KafkaConsumer() {
-#ifndef DEBUG
-        _consumer->close();
-        delete _consumer;
-#endif
     }
-
-private:
-    RdKafka::KafkaConsumer* _consumer;
 };
 
 int main(int argc, char* argv[]) {
-#ifdef DEBUG
     if(argc < 2 || argv[1] != std::string("UP") && argv[1] != std::string("DOWN")) {
-        std::cerr << "Usage: " << argv[0] << " <command>(UP|DOWN)" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <command>(UP|DOWN) <testConfigFile>" << std::endl;
         return 1;
     }
-#endif
-    if(parse_master_config("master.conf", clients) < 0) {
-        std::cerr << "Failed to parse master configuration." << std::endl;
+    rate_save_path = std::string("./test-case/rate-") + argv[2] + ".log";
+    config_file_path = std::string("./test-case/") + argv[2] + ".conf";
+    if(parse_master_config(argv[2], clients) < 0) {
+        std::cerr << "Failed to parse test config." << std::endl;
         return 1;
     }
-
-    KafkaConsumer consumer("106.75.16.47:9092", "sm-group");
-    KafkaProducer producer("106.75.16.47:9092");
+    
+    KafkaConsumer consumer("111.22.18.149:9092", "sm-group");
     consumer.subscribe({"transmission_task"});
-    producer.set_topic("transmission_task_status");
-#ifndef DEBUG
-    consumer.consume(producer);
-#else
-    consumer.consume(producer, argv[1]); // 模拟接收到的消息
-#endif
+    consumer.consume(argv[1]); // 模拟接收到的消息
     return 0;
 }

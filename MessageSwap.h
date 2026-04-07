@@ -77,7 +77,8 @@ public:
     int setUpAddr(uint32_t local_addr, uint32_t remote_addr)
     {
         this->local_ip = local_addr;
-        this->remote_ip = inet_addr("10.2.152.201"); //remote_addr;
+        //直接发送给交换机，交换机返回给发送端
+        this->remote_ip = remote_addr; // inet_addr("10.2.152.201"); 
         if(!this->local_ip || !this->remote_ip)
         {
             cout << "ERROR: wrong ip address string." << endl;
@@ -163,10 +164,10 @@ public:
                     this->true_rate = 0.0; 
                 lucp_packet->payload.o_s = 0.0;
                 lucp_packet->payload.g_s = this->init_rate;
-                if(this->true_rate > 0 && this->true_rate <= 8.0)
+                if(this->true_rate > 0) // && this->true_rate <= 8.0)
                     this->timer->updateInterval(this->init_interval * this->init_rate / this->true_rate);
-                else
-                    this->timer->updateInterval(this->init_interval * this->init_rate / 8.0);
+                // else
+                //     this->timer->updateInterval(this->init_interval * this->init_rate / 8.0);
 
                 //the first time when x_r change to postive value
                 if(this->true_rate > 0 && !this->rate_init) 

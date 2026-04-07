@@ -278,8 +278,8 @@ void sniff_lucp()
         // auto now_time = std::chrono::high_resolution_clock::now();
 	    struct ethhdr *eth = (struct ethhdr*)delay_buf[head].data;
         struct iphdr *ip_header = (struct iphdr*)(delay_buf[head].data + sizeof(struct ethhdr));
-        auto it = dst_port_cache.find(ip_header->saddr);
-        if (it == dst_port_cache.end() || ip_header->daddr != inet_addr("10.2.152.201"))
+        auto it = dst_port_cache.find(ip_header->daddr);
+        if (it == dst_port_cache.end())
             continue;
         /*printf("\n[帧长度: %ld]MAC: %02X:%02X:%02X:%02X:%02X:%02X → %02X:%02X:%02X:%02X:%02X:%02X\n", 
             delay_buf[head].size,
@@ -296,18 +296,21 @@ void sniff_lucp()
 	    ip_header->protocol == IPPROTO_ICMP ? "ICMP" :
             ip_header->protocol == IPPROTO_UDP ? "UDP" : "其他");
 	*/
-        memcpy(eth->h_dest, eth->h_source, 6);
-	memcpy(from.sll_addr, eth->h_source, 6);
+        // memcpy(eth->h_dest, eth->h_source, 6);
+        // memcpy(from.sll_addr, eth->h_source, 6);
         memcpy(eth->h_source, if_mac, 6);
-	ip_header->daddr = ip_header->saddr;
-	ip_header->saddr = inet_addr("10.2.152.201");
+        // ip_header->daddr = ip_header->saddr;
+        // ip_header->saddr = inet_addr("10.2.152.201");
+        memcpy(from.sll_addr, eth->h_dest, 6);
         if (ip_header->protocol == IPPROTO_ICMP) {
             struct LucpPacket *lucp_packet = (struct LucpPacket *)((char*)ip_header + sizeof(struct iphdr));
-            if (lucp_packet->hdr.type == ICMP_INFO_REQUEST) {
-		lucp_packet->hdr.type = ICMP_INFO_REPLY;
-                lucp_packet->payload.r_c += 1; // 指示当前路由器
+            if (lucp_packet->hdr.type == ICMP_INFO_REQUEST || lucp_packet->hdr.type == ICMP_INFO_REPLY) {
+		        // lucp_packet->hdr.type = ICMP_INFO_REPLY;
+                
                 // 包中过载率和公平速率是否更新的判定
+                if(lucp_packet->hdr.type == ICMP_INFO_REQUEST)
                 {
+                    lucp_packet->payload.r_c += 1; // 指示当前路由器
                     std::lock_guard<std::mutex> lock(it->second->cache_mutex);
                     // 如果当前路由器的过载率大于包中的过载率，
                     // 或者当前路由器的公平速率小于包中的公平速率
@@ -326,19 +329,16 @@ void sniff_lucp()
                         it->second->u_l += lucp_packet->payload.x_r;
                     it->second->y_l += lucp_packet->payload.x_r;      // 总流量增加
                     lucp_packet->payload.n_iter = it->second->n_iter; // 将当前迭代次数写入
+                    lucp_packet->hdr.checksum = 0;
+                    lucp_packet->hdr.checksum = in_cksum((unsigned short *)lucp_packet, sizeof(LucpPacket));
                 }
                 // 计算校验和
-                lucp_packet->hdr.checksum = 0;
-                lucp_packet->hdr.checksum = in_cksum((unsigned short *)lucp_packet, sizeof(LucpPacket));
                 // 原路径转发回网络中
                 // delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
 	//	cout << "recv lucp packet, x_r is :" << lucp_packet->payload.x_r << ", seq: " << htons(lucp_packet->hdr.un.echo.sequence)  << endl;
-                sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
-#ifdef DEBUG
-                if (ntohs(lucp_packet->hdr.un.echo.sequence) == 0) // for debug，报告新流到来
-                    cout << "new flow id " << lucp_packet->hdr.un.echo.id << "arrives." << endl;
-#endif
             }
+            cout << "recv icmp packet, type is :" << (int)lucp_packet->hdr.type << ", seq: " << htons(lucp_packet->hdr.un.echo.sequence)  << endl;
+            sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
         }
     }
     stop_event = true;
