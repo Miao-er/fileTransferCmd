@@ -30,8 +30,8 @@ int main(int narg, char *argv[])
         return -1;
     }
     // Create an hdRDMA object
-    HwRdma hwrdma(local_conf.getRdmaGidIndex(), 1024UL * local_conf.getBlockSize() * local_conf.getBlockNum() * local_conf.getMaxThreadNum(), inet_addr(argv[1]));
-    // HwRdma hwrdma(local_conf.getRdmaGidIndex(), 1024UL * 64 * local_conf.getBlockNum() * local_conf.getMaxThreadNum(), inet_addr(argv[1]));
+    // HwRdma hwrdma(local_conf.getRdmaGidIndex(), 1024UL * local_conf.getBlockSize() * local_conf.getBlockNum() * local_conf.getMaxThreadNum(), inet_addr(argv[1]));
+    HwRdma hwrdma(local_conf.getRdmaGidIndex(), 1024UL * 256 * local_conf.getBlockNum() * local_conf.getMaxThreadNum(), inet_addr(argv[1]));
     cout << "Server bind to addr: " << argv[1] << endl;
     if(hwrdma.init())
     {
