@@ -89,7 +89,7 @@ int StreamControl::createLucpContext()
     qp_init_attr.cap.max_send_sge = 1;
     qp_init_attr.cap.max_recv_sge = 1;
     if(this->use_message)
-        qp_init_attr.qp_type = IBV_QPT_UC;
+        qp_init_attr.qp_type = IBV_QPT_RC;
     else
         qp_init_attr.qp_type = IBV_QPT_RC;
 
@@ -98,8 +98,8 @@ int StreamControl::createLucpContext()
     if(this->use_message)
         local_qp_info.block_size = local_conf->getBlockSize();
     else
-        local_qp_info.block_size = 64;
-    //local_qp_info.lucp_id = duration_cast<nanoseconds>(high_resolution_clock::now().time_since_epoch()).count(); //TODO
+        local_qp_info.block_size = local_conf->getBlockSize();
+    local_qp_info.lucp_id = duration_cast<nanoseconds>(high_resolution_clock::now().time_since_epoch()).count(); //TODO
     // local_qp_info.recv_depth = qp_init_attr.cap.max_recv_wr; //must before create qp,or max_recv_wr will change.
     memcpy(local_qp_info.gid, &hwrdma->gid, 16);
     // Create Queue Pair
@@ -184,7 +184,7 @@ int StreamControl::changeQPState()
         qp_attr.path_mtu = hwrdma->port_attr.active_mtu,
         qp_attr.dest_qp_num = this->remote_qp_info.qp_num,
         qp_attr.rq_psn = 0;
-        if(!this->use_message)
+        // if(!this->use_message)
         {
             qp_attr.max_dest_rd_atomic = 1,
             qp_attr.min_rnr_timer = 0x12,
@@ -205,7 +205,7 @@ int StreamControl::changeQPState()
         auto ret = ibv_modify_qp(qp, &qp_attr,
                                     IBV_QP_STATE | IBV_QP_AV |
                                         IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
-                                        IBV_QP_RQ_PSN | (this->use_message ? 0:(IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER)));
+                                        IBV_QP_RQ_PSN |IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER);
         if (ret != 0)
         {
             cout << "ERROR: Unable to set QP to RTR state!" << endl;
@@ -218,7 +218,7 @@ int StreamControl::changeQPState()
         struct ibv_qp_attr qp_attr;
         bzero(&qp_attr, sizeof(qp_attr));
         qp_attr.qp_state = IBV_QPS_RTS;
-        if(!this->use_message)
+        // if(!this->use_message)
         {
             qp_attr.timeout = 20,
             qp_attr.retry_cnt = 7,
@@ -229,7 +229,7 @@ int StreamControl::changeQPState()
 
         auto ret = ibv_modify_qp(qp, &qp_attr,
                                     IBV_QP_STATE | IBV_QP_SQ_PSN
-                                    | (this->use_message ? 0 : (IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT | IBV_QP_MAX_QP_RD_ATOMIC)));
+                                    | (IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_TIMEOUT | IBV_QP_MAX_QP_RD_ATOMIC));
         if (ret != 0)
         {
             cout << "ERROR: Unable to set QP to RTS state!" << endl;
@@ -253,7 +253,7 @@ int StreamControl::connectPeer()
     }
     QPInfo net_local_qp_info, net_remote_qp_info;
     net_local_qp_info.lid = htons(local_qp_info.lid);
-    //net_local_qp_info.lucp_id = htons(local_qp_info.lucp_id);
+    net_local_qp_info.lucp_id = htons(local_qp_info.lucp_id);
     net_local_qp_info.qp_num = htonl(local_qp_info.qp_num);
     net_local_qp_info.block_num = htonl(local_qp_info.block_num);
     net_local_qp_info.block_size = htonl(local_qp_info.block_size);
@@ -266,7 +266,7 @@ int StreamControl::connectPeer()
         return -2;
     }
     remote_qp_info.lid = ntohs(net_remote_qp_info.lid);
-    //remote_qp_info.lucp_id = ntohs(net_remote_qp_info.lucp_id);
+    remote_qp_info.lucp_id = ntohs(net_remote_qp_info.lucp_id);
     remote_qp_info.qp_num = ntohl(net_remote_qp_info.qp_num);
     remote_qp_info.block_num = ntohl(net_remote_qp_info.block_num);
     remote_qp_info.block_size = ntohl(net_remote_qp_info.block_size);
@@ -276,13 +276,15 @@ int StreamControl::connectPeer()
     if(!this->server_mode)
         this->block_size = 1024UL * remote_qp_info.block_size;
     else
-        this->block_size = 1024UL * (this->use_message? local_conf->getBlockSize() : 64);
+        // this->block_size = 1024UL * (this->use_message? local_conf->getBlockSize() : 64);
+        this->block_size = 1024UL * local_conf->getBlockSize();
     this->rateController = new RateController(this->default_rate, this->block_size);
     if(this->rateController->initSwap(hwrdma->bind_ip, this->peer_addr) < 0)
     {
         cout << "RateController init failed." << endl;
         return -1;
     }
+    this->rateController->setId(remote_qp_info.lucp_id ^ local_qp_info.lucp_id);
     this->rateController->startSwap();
 #ifndef DEBUG
     cout << "     local:" << endl

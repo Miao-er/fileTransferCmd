@@ -22,6 +22,7 @@ class StreamControl;
 struct QPInfo
 {
     uint16_t lid;
+    uint16_t lucp_id;
     uint32_t qp_num;
     uint32_t block_num;
     uint32_t block_size;

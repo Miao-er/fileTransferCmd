@@ -17,7 +17,7 @@
 #include <librdkafka/rdkafkacpp.h>
 #include <nlohmann/json.hpp>  // 添加json库头文件
 using json = nlohmann::json;
-#define MAX_RATE 50000.0
+#define MAX_RATE 100000.0
 #define DEBUG
 // #define READ_FROM_FILE
 

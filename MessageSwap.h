@@ -34,6 +34,7 @@ public:
     uint16_t send_seq;
     high_resolution_clock::time_point fisrt_send,first_recv;
     ofstream output_file;
+    uint16_t lucp_id;
 
     MessageSwap(double rate, double init_interval)
     {
@@ -48,6 +49,7 @@ public:
         this->send_seq = 0;
         this->init_iter = false;
         this->rate_init = false;
+        this->lucp_id = 0;
         this->output_file.open("message.log", std::ios::out);
 
         cache_packet.hdr.code = 0;
@@ -134,7 +136,7 @@ public:
             }
             struct iphdr *ip_header = (struct iphdr *)buffer;
             struct  LucpPacket *lucp_packet = (struct LucpPacket *)(buffer + sizeof(struct iphdr));
-            if(ip_header->daddr != this->local_ip || ip_header->saddr != this->remote_ip) continue;
+            if(ip_header->daddr != this->local_ip || ip_header->saddr != this->remote_ip || lucp_packet->hdr.un.echo.id != this->lucp_id) continue;
             if(lucp_packet->hdr.type == ICMP_INFO_REPLY
             && !(this->pause_send_event)) // recv reply
             {
@@ -153,6 +155,7 @@ public:
                 lucp_packet->payload.r_c = 0;
                 lucp_packet->payload.r_t = lucp_packet->payload.r_s;
                 lucp_packet->payload.r_s = 0;
+                //s
                 lucp_packet->payload.x_r =  std::min(this->init_rate,lucp_packet->payload.g_s);
                 if(lucp_packet->payload.n_iter - this->cache_packet.payload.n_iter >= 3)
                 {
@@ -218,6 +221,7 @@ public:
             t = high_resolution_clock::now();
             if(timeout > t)
                 usleep(duration_cast<duration<double>>(timeout -t).count() * 1e6);
+            this->cache_packet.hdr.un.echo.id = this->lucp_id;
             this->cache_packet.hdr.un.echo.sequence = htons(this->send_seq++);
             current = high_resolution_clock::now();
             sendto(this->raw_socket, &(this->cache_packet), sizeof(LucpPacket), 0, (struct sockaddr*)&to, len);
@@ -276,6 +280,10 @@ public:
             return this->message_swap->true_rate;
         else return 0.0;
 
+    }
+    void setId(uint16_t lucpId)
+    {
+        this->message_swap->lucp_id = lucpId;
     }
     void runSend()
     {   

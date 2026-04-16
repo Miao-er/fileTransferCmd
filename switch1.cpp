@@ -309,7 +309,7 @@ void sniff_lucp()
         // 直接在环形缓冲区接收数据
         int head = 0;
         {
-            std::unique_lock<std::mutex> lock(buf_mutex);
+            // std::unique_lock<std::mutex> lock(buf_mutex);
             head = _head;
         }
         delay_buf[head].size = recvfrom(sockfd, delay_buf[head].data, MTU, MSG_DONTWAIT, (struct sockaddr *)&from, &fromlen);
@@ -376,32 +376,32 @@ void sniff_lucp()
                     sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
                 }
                 else {
-                    std::unique_lock<std::mutex> lock(buf_mutex);
-                    delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
-                    delay_buf[head].valid = true;
-                    _head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
+                    // std::unique_lock<std::mutex> lock(buf_mutex);
+                    // delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
+                    // delay_buf[head].valid = true;
+                    // _head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
+                    sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
                 }
             }
             else if(lucp_packet->hdr.type == ICMP_ECHOREPLY){
-                std::unique_lock<std::mutex> lock(buf_mutex);
-                delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
-                delay_buf[head].valid = true;
-                _head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
+                // std::unique_lock<std::mutex> lock(buf_mutex);
+                // delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
+                // delay_buf[head].valid = true;
+                // _head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
+                sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
             }
             else {
                 sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
             }
-            // delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
-            // sendto(sockfd, delay_buf[head].data,delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
         }else if (ip_header->protocol == IPPROTO_UDP)
         {
             // 缓存延迟发送
             // cout << "UDP packet received, size: " << delay_buf[head].size << endl;
-            std::unique_lock<std::mutex> lock(buf_mutex);
-            delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
-            delay_buf[head].valid = true;
-            _head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
-            // sendto(sockfd, delay_buf[head].data, delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
+            // std::unique_lock<std::mutex> lock(buf_mutex);
+            // delay_buf[head].send_time = now_time + delay_ms; // 延迟发送
+            // delay_buf[head].valid = true;
+            // _head = (head + 1) % DELAY_BUF_SIZE; // 更新环形缓冲区头部
+            sendto(sockfd, delay_buf[head].data, delay_buf[head].size, 0, (struct sockaddr *)&from, fromlen);
         }
     }
     stop_event = true;
@@ -442,9 +442,9 @@ int main(int argc, char *argv[])
     parse_switch_config(argv[1]);
     std::thread sniff_thread(sniff_lucp);
     std::thread collect_thread(collect_thread_func);
-    std::thread delay_thread(delay_sender_thread, socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP)));
+    // std::thread delay_thread(delay_sender_thread, socket(AF_PACKET, SOCK_RAW, htons(ETH_P_IP)));
     sniff_thread.join();
-    delay_thread.join();
+    // delay_thread.join();
     collect_thread.join();
     destroy_switch();
     return 0;

@@ -1,10 +1,13 @@
 *.o
-error.log
-message.log
-rate.log
+*.log
+*.swp
 *.lucp
 *.dcqcn
+*.pcap
+*.svg
 client
 server
 switch
 master
+test-case/*
+test_case
