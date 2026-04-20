@@ -628,7 +628,7 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
     while (1)
     { 
         // cout << "try to recv restran" << endl;
-        if(this->use_message)
+        if(this->use_message && bytes_left == 0)
         {
             int rc = recv(this->peer_fd, &restran_num, sizeof(uint32_t), MSG_DONTWAIT);
             if(rc < 0 && (errno == EWOULDBLOCK || errno == EINTR));
@@ -688,10 +688,10 @@ int StreamControl::postSendFile(uint64_t file_size, int rate_sock)
            //_io = high_resolution_clock::now();
             // read(fd, (char *)sge.addr, bytes_payload);
             //duration_io += duration_cast<duration<double>>(high_resolution_clock::now() - t_io).count();
-
+            if(this->use_message)
+                this->rateController->updateNextSend();
             auto ret = ibv_post_send(qp, &wr, &bad_wr);
             uncomplete_bytes.push_back(bytes_payload); 
-            this->rateController->updateNextSend();
             if (ret != 0)
             {
                 cout << "WARNING: ibv_post_send returned non zero value (" << ret << ")" << endl;

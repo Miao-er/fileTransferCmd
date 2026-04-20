@@ -48,7 +48,6 @@ void handle_transfer(cmd_info cmd_info, bool use_message, int rate_sock) {
         std::cerr << "Failed to load local configuration." << std::endl;
         return;
     }
-    signal(SIGPIPE, SIG_IGN);
     HwRdma hwrdma(local_conf.getRdmaGidIndex(), (uint64_t)-1, inet_addr(cmd_info.local_ip));
     if(hwrdma.init())
     {
@@ -85,6 +84,7 @@ void handle_transfer(cmd_info cmd_info, bool use_message, int rate_sock) {
 
 int main(int argc, char* argv[])
 {
+    signal(SIGPIPE, SIG_IGN);
     int listen_port = 2025; // 客户端监听端口
     int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int opt_val = 1;

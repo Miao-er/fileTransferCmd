@@ -41,7 +41,7 @@ using std::string;
 
 // std::ofstream fout("log.txt");
 int WIRE_NUM = 0;
-const int MAX_WIRE_NUM = 4;
+const int MAX_WIRE_NUM = 6;
 
 // 描述接收数据包时的以太网链路层的对端信息，实际上值为交换机连接本机的出端口信息
 struct sockaddr_ll from;
@@ -70,8 +70,9 @@ struct SwitchCache
             g_l = line_rate; // - my_cache.u_l / 5;
         else
             g_l = (line_rate * SEND_TIMES - u_l) / n_l;
-       // cout <<"iter:"<< n_iter + 1 <<"\tn:" << n_l << "\tu:" << u_l << "\ty:" << y_l
-       //  << "\tg_l:"<<g_l<<"\to_l:"<<o_l<<endl;
+	if (y_l < 0)
+        cout <<"iter:"<< n_iter + 1 <<"\tn:" << n_l << "\tu:" << u_l << "\ty:" << y_l
+         << "\tg_l:"<<g_l<<"\to_l:"<<o_l<<endl;
         if (g_l < 0)
             g_l = 0;
         n_l = 0;
@@ -325,7 +326,7 @@ void sniff_lucp()
         auto it = dst_port_cache.find(ip_header->daddr);
         if (it == dst_port_cache.end())
             continue;
-        /*printf("\n[帧长度: %ld]MAC: %02X:%02X:%02X:%02X:%02X:%02X → %02X:%02X:%02X:%02X:%02X:%02X\n", 
+  /*      printf("\n[帧长度: %ld]MAC: %02X:%02X:%02X:%02X:%02X:%02X → %02X:%02X:%02X:%02X:%02X:%02X\n", 
             delay_buf[head].size,
             eth->h_source[0], eth->h_source[1], eth->h_source[2],
             eth->h_source[3], eth->h_source[4], eth->h_source[5],
@@ -338,8 +339,8 @@ void sniff_lucp()
             ntohs(ip_header->tot_len),
             src_addr,dst_addr,
 	    ip_header->protocol == IPPROTO_ICMP ? "ICMP" :
-            ip_header->protocol == IPPROTO_UDP ? "UDP" : "其他");*/
-
+            ip_header->protocol == IPPROTO_UDP ? "UDP" : "其他");
+*/
         //src_mac <- local mac
          memcpy(eth->h_source, if_mac, 6);
         // dst_mac <- vlan mac

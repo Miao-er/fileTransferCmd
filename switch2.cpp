@@ -41,7 +41,7 @@ using std::string;
 
 // std::ofstream fout("log.txt");
 int WIRE_NUM = 0;
-const int MAX_WIRE_NUM = 4;
+const int MAX_WIRE_NUM = 6;
 
 // 描述接收数据包时的以太网链路层的对端信息，实际上值为交换机连接本机的出端口信息
 struct sockaddr_ll from;

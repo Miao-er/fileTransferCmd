@@ -18,6 +18,7 @@
 #include <nlohmann/json.hpp>  // 添加json库头文件
 using json = nlohmann::json;
 #define MAX_RATE 100000.0
+#define COLLECT_INTERVAL 0.01
 #define DEBUG
 // #define READ_FROM_FILE
 
@@ -47,24 +48,27 @@ void caculator_factor(double& fairness, double& stability)
 {
     std::ifstream read_rate("rate.log");
     std::string line;
-    std::vector<std::string> list_name = {"task_1_rate", "task_2_rate", "task_3_rate"};
+    std::vector<std::string> list_name = {"task_1_rate", "task_2_rate", "task_3_rate","task_4_rate"};
     std::vector<double> list_rate;
 
     int fairness_count = 0;
     double fairness_sum = 0;
 
-    std::deque<double> rate_1, rate_2, rate_3;
+    std::deque<double> rate_1, rate_2, rate_3, rate_4;
     rate_1.clear();
     rate_2.clear();
     rate_3.clear();
-    std::deque<double>* list_rate_ptr[3];
+    rate_4.clear();
+    std::deque<double>* list_rate_ptr[4];
     list_rate_ptr[0] = &rate_1;
     list_rate_ptr[1] = &rate_2;
     list_rate_ptr[2] = &rate_3;
+    list_rate_ptr[3] = &rate_4;
+
     std::vector<double> list_osci;
-    double stab_list_sum[3] = {0};
-    int stab_list_count[3] = {0};
-    double stab_sum_rate[3] = {0};
+    double stab_list_sum[4] = {0};
+    int stab_list_count[4] = {0};
+    double stab_sum_rate[4] = {0};
     const int w_size = 100;
     while (std::getline(read_rate, line)) {
         // 处理每一行
@@ -117,16 +121,16 @@ void caculator_factor(double& fairness, double& stability)
     if(fairness_count > 0)
     {
         fairness = fairness_sum / fairness_count;
-	fairness = std::max(0.0, (fairness - 1/3.0) / (2/3.0));
+	fairness = std::max(0.0, (fairness - 1/4.0) / (3/4.0));
     }
-    for(int i = 0; i < 3; i ++)
+    for(int i = 0; i < 4; i ++)
     {
         if(stab_list_count[i] > 0)
             stab_list_sum[i] /= stab_list_count[i];
         stab_list_sum[i] = std::exp(-1 * stab_list_sum[i] / 0.1);
         stability += stab_list_sum[i];
     }
-    stability /= 3;
+    stability /= 4;
     read_rate.close();
 }
 
@@ -332,7 +336,7 @@ void check_and_send_thread(RateCollector* collector, KafkaProducer& producer) {
             }
         }
         j_obj["total_rate"] = total_rate > MAX_RATE/1000.0 ? MAX_RATE/1000.0 : total_rate; // 限制总速率
-        j_obj["timepoint"] = (double)elem.seq_num / 100.0;
+        j_obj["timepoint"] = (double)elem.seq_num * COLLECT_INTERVAL;
         if(collector->finished_count.load() == collector->client_num && collector->rate_queue.size() == 1)
         {
             double fairness = 0, stability = 0;
@@ -352,13 +356,13 @@ void check_and_send_thread(RateCollector* collector, KafkaProducer& producer) {
     }
 }
 
-int collect_rate_info(RateCollector* collector, int rate_sock, int idx) {
+int collect_rate_info(RateCollector* collector, int rate_sock, int idx, double delay) {
     RateInfo info;
     while (true) {
         int ret = recv(rate_sock, (char*)&info, sizeof(RateInfo), 0);
         if (ret <= 0) break;
         std::unique_lock<std::mutex> lock(collector->queue_mutex);
-        int true_seq_num = info.seq_num + idx * 100; // 假设每个客户端的seq_num是连续的
+        int true_seq_num =info.seq_num + ceil(delay / COLLECT_INTERVAL);// 假设每个客户端的seq_num是连续的
         // 检查是否需要创建新的RateQueueElem
         while (collector->rate_queue.empty() || collector->wait_seq_num <= true_seq_num) {
             collector->rate_queue.emplace_back(collector->client_num, collector->wait_seq_num);
@@ -371,9 +375,9 @@ int collect_rate_info(RateCollector* collector, int rate_sock, int idx) {
         // 检查是否全部填充
         bool all_ready = true;
         for (size_t i = 0; i < collector->client_num; ++i) {
-            if(i == idx) continue;
-            if(collector->rate_queue[true_seq_num - front_seq_num].seq_num < i * 100)
-                break;
+            // if(i == idx) continue;
+            // if(collector->rate_queue[true_seq_num - front_seq_num].seq_num < i * 100)
+            //     break;
             if(collector->finished_arr[i]) continue;
             if (collector->rate_queue[true_seq_num - front_seq_num].rates[i].seq_num == 0 && collector->rate_queue[true_seq_num - front_seq_num].rates[i].rate < 0) {
                 all_ready = false;
@@ -384,7 +388,7 @@ int collect_rate_info(RateCollector* collector, int rate_sock, int idx) {
             collector->rate_queue[true_seq_num - front_seq_num].ready = true;
             collector->queue_cv.notify_one();
         }
-        if(true_seq_num > idx * 100 + 5 && info.rate < 0)
+        if(info.seq_num > 0 && info.rate < 0)
         {
             collector->finished_count++;
             collector->finished_arr[idx] = true;
@@ -443,7 +447,7 @@ void send_start_cmd(RateCollector* collector, const ClientInfo& client, const st
     }
     else
         std::cout << "Sent END command to " << client.local_ip << std::endl;
-    collect_rate_info(collector, sockfd, idx);
+    collect_rate_info(collector, sockfd, idx, cmd_info.delay);
     close(sockfd);
 }
 

@@ -1,11 +1,11 @@
 [Mac]
 b0:51:8e:f6:36:13
 [Port]
-Ethernet48 91.0
-Ethernet49 91.0
-Ethernet50 91.0
-Ethernet51 91.0
-Ethernet4 91.0
+Ethernet48 90.0
+Ethernet49 90.0
+Ethernet50 90.0
+Ethernet51 90.0
+Ethernet4 90.0
 [Route]
 10.2.229.111 Ethernet4
 10.2.229.121 Ethernet4
